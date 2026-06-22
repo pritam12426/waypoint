@@ -193,3 +193,182 @@ pub struct UpdateBookmark {
 	pub is_archived: Option<bool>,
 }
 
+impl UpdateBookmark {
+	/// Describes which fields this partial update actually changes relative
+	/// to `existing`, for logging — so a log line says "starred #1" instead
+	/// of a bare "updated #1". Mirrors the change detection in
+	/// `database::bookmarks::update` (empty keyword clears, empty title is
+	/// ignored, `tags` replaces the set).
+	///
+	/// The returned strings are human-readable verbs ("renamed",
+	/// "set keyword to \"x\"", ...) that get joined into an audit message.
+	pub fn describe(&self, existing: &Bookmark) -> Vec<String> {
+		let mut ops = Vec::new();
+
+		// Title: a blank title is ignored (never a deliberate "clear"),
+		// and a same-as-before value is not a change worth logging.
+		if self
+			.title
+			.as_deref()
+			.is_some_and(|t| !t.trim().is_empty() && t != existing.title)
+		{
+			ops.push("renamed".to_string());
+		}
+		if self.url.as_deref().is_some_and(|u| u != existing.url) {
+			ops.push("changed url".to_string());
+		}
+		// Keyword is the one genuinely tri-state field: `Some("")` clears.
+		match self.keyword.as_deref() {
+			Some("") => ops.push("cleared keyword".to_string()),
+			Some(k) => ops.push(format!("set keyword to \"{k}\"")),
+			None => {}
+		}
+		// Category is looked up by name downstream; a blank one is ignored.
+		if let Some(c) = self.category.as_deref()
+			&& !c.trim().is_empty()
+		{
+			ops.push(format!("moved to category \"{c}\""));
+		}
+		if self.tags.is_some() {
+			ops.push("updated tags".to_string());
+		}
+		if let Some(add) = &self.add_tags
+			&& !add.is_empty()
+		{
+			ops.push(format!("added tags {}", add.join(", ")));
+		}
+		if let Some(rm) = &self.remove_tags
+			&& !rm.is_empty()
+		{
+			ops.push(format!("removed tags {}", rm.join(", ")));
+		}
+		// Booleans are two-state from the caller's perspective, so both
+		// directions get their own verb.
+		match self.starred {
+			Some(true) => ops.push("starred".to_string()),
+			Some(false) => ops.push("unstarred".to_string()),
+			None => {}
+		}
+		match self.is_archived {
+			Some(true) => ops.push("archived".to_string()),
+			Some(false) => ops.push("unarchived".to_string()),
+			None => {}
+		}
+		// The free-text fields compare `Some(actual) != Some(new)`, i.e. a
+		// `Some("")` *does* count as "cleared" for these.
+		if self
+			.description
+			.as_ref()
+			.is_some_and(|d| Some(d) != existing.description.as_ref())
+		{
+			ops.push("updated description".to_string());
+		}
+		if self
+			.note
+			.as_ref()
+			.is_some_and(|n| Some(n) != existing.note.as_ref())
+		{
+			ops.push("updated note".to_string());
+		}
+		// Favicon/thumbnail follow the keyword's tri-state idiom: `Some("")`
+		// means "reset favicon to the generic domain favicon" / "clear
+		// thumbnail" (see `database::bookmarks::update`), so each gets its
+		// own verb instead of the generic "updated". The asset modes are
+		// distinct instructions and describe themselves the same way.
+		match self.favicon_mode {
+			Some(AssetMode::Default) => ops.push("reset favicon to the bundled default".into()),
+			Some(AssetMode::Fetch) => ops.push("fetched favicon from the page".into()),
+			Some(AssetMode::Auto) => ops.push("re-derived favicon".into()),
+			None => match self.favicon.as_deref() {
+				Some("") => ops.push("reset favicon to default".to_string()),
+				Some(f) if Some(f) != existing.favicon.as_deref() => {
+					ops.push("updated favicon".to_string())
+				}
+				_ => {}
+			},
+		}
+		match self.thumbnail_mode {
+			Some(AssetMode::Default) => ops.push("set thumbnail to the bundled default".into()),
+			Some(AssetMode::Fetch) => ops.push("fetched thumbnail from the page".into()),
+			Some(AssetMode::Auto) => ops.push("re-derived thumbnail".into()),
+			None => match self.thumbnail.as_deref() {
+				Some("") => ops.push("cleared thumbnail".to_string()),
+				Some(t) if Some(t) != existing.thumbnail.as_deref() => {
+					ops.push("updated thumbnail".to_string())
+				}
+				_ => {}
+			},
+		}
+		if self.refresh {
+			ops.push("refreshed media".to_string());
+		}
+
+		ops
+	}
+
+	/// Whether any field actually asks for a change. A request with nothing
+	/// set is a no-op; single updates tolerate it, but a bulk update must
+	/// reject it to avoid a misleading "updated N bookmark(s)".
+	pub fn has_any_change(&self) -> bool {
+		self.title.is_some()
+			|| self.url.is_some()
+			|| self.description.is_some()
+			|| self.category.is_some()
+			|| self.tags.is_some()
+			|| self.add_tags.is_some()
+			|| self.remove_tags.is_some()
+			|| self.keyword.is_some()
+			|| self.note.is_some()
+			|| self.favicon.is_some()
+			|| self.thumbnail.is_some()
+			|| self.favicon_mode.is_some()
+			|| self.thumbnail_mode.is_some()
+			|| self.refresh
+			|| self.starred.is_some()
+			|| self.is_archived.is_some()
+	}
+}
+
+/// A category (the `categories` table row: id + unique name).
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct Category {
+	pub id: i64,
+	pub name: String,
+}
+
+/// A tag's name plus how many bookmarks use it. Used by `/api/tags`.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct TagCount {
+	pub name: String,
+	pub count: i64,
+}
+
+/// A domain plus how many bookmarks share it. Used by the domain-stats
+/// views (top domains by bookmark count).
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct DomainCount {
+	pub domain: String,
+	pub count: i64,
+}
+
+/// A category's name plus its bookmark count, for the overview.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct CategoryCount {
+	pub name: String,
+	pub count: i64,
+}
+
+/// A bookmark plus visit-derived fields, used in the "most visited" and
+/// "recently added" lists of the stats overview.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct BookmarkVisitStats {
+	pub id: i64,
+	pub title: String,
+	pub url: String,
+	pub domain: Option<String>,
+	pub visit_count: i64,
+	pub last_visited_at: Option<String>,
+	pub created_at: String,
+}
+
+/// The aggregated `GET /api/stats` / `stats` overview payload.
