@@ -372,3 +372,145 @@ pub struct BookmarkVisitStats {
 }
 
 /// The aggregated `GET /api/stats` / `stats` overview payload.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct StatsOverview {
+	pub total: i64,
+	pub starred: i64,
+	pub archived: i64,
+	pub trashed: i64,
+	pub categories: Vec<CategoryCount>,
+	pub top_domains: Vec<DomainCount>,
+	pub top_tags: Vec<TagCount>,
+	pub most_visited: Vec<BookmarkVisitStats>,
+	pub recently_added: Vec<BookmarkVisitStats>,
+}
+
+/// Domain-level visit aggregation: total visits across all bookmarks of a
+/// domain and how many bookmarks that domain accounts for.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct DomainVisitStats {
+	pub domain: String,
+	pub total_visits: i64,
+	pub bookmark_count: i64,
+}
+
+/// A bookmark that has never been opened via its keyword shortcut
+/// (`visit_count = 0`).
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct NeverVisitedBookmark {
+	pub id: i64,
+	pub title: String,
+	pub url: String,
+	pub domain: Option<String>,
+	pub created_at: String,
+}
+
+/// A tag attached to exactly one active bookmark — a candidate for cleanup.
+/// `bookmark_id`/`bookmark_title` point at that one owner.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct OrphanTag {
+	pub name: String,
+	pub bookmark_id: i64,
+	pub bookmark_title: String,
+}
+
+/// Hygiene counts over active bookmarks: how many are missing tags, notes,
+/// or descriptions.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct HygieneStats {
+	pub total: i64,
+	pub missing_tags: i64,
+	pub missing_note: i64,
+	pub missing_description: i64,
+}
+
+/// Bookmarks added in a given month (`month` is `"YYYY-MM"`), for the
+/// activity timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct MonthlyActivity {
+	pub month: String,
+	pub count: i64,
+}
+
+/// The outcome of a criteria-based bulk remove: the bookmarks that matched
+/// the filter (even when nothing was written, i.e. a dry-run or a no-op)
+/// and how many were actually moved to trash / purged.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct BulkRemoveResult {
+	/// Every bookmark matching the filter, in id order.
+	pub ids: Vec<i64>,
+	/// How many were actually removed (`0` for a dry-run or a 0-match).
+	pub removed: i64,
+}
+
+/// Payload for a bulk update: one partial update applied to a list of ids.
+/// `ids` must be non-empty and `update` must change at least one field;
+/// ids that don't exist or are trashed are reported in the result's
+/// `skipped` list instead of failing the request.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct BulkUpdateRequest {
+	/// Bookmark ids to update (at least one, each positive).
+	pub ids: Vec<i64>,
+	/// The partial update to apply to every id (see `UpdateBookmark`).
+	pub update: UpdateBookmark,
+}
+
+/// Outcome of a bulk update: which ids the change was applied to and which
+/// were skipped (not found or trashed). A constraint failure (duplicate
+/// URL/keyword) fails the whole request instead, like single updates.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct BulkUpdateResult {
+	/// Ids the update was successfully applied to, in request order.
+	pub updated: Vec<i64>,
+	/// Ids skipped because the bookmark doesn't exist or is trashed.
+	pub skipped: Vec<i64>,
+}
+
+/// Filter/pagination options for listing bookmarks.
+///
+/// `archived`: `None` means "don't filter on archived state" (returns both
+/// active and archived, still excluding trashed); `Some(true)` /
+/// `Some(false)` restrict to just one or the other.
+///
+/// `trash`: when `true`, overrides everything else and returns only
+/// trashed bookmarks (the recycle bin view). All other read paths
+/// keep excluding trashed rows.
+///
+/// `category_id` filters by the precise row id (a name can't, since names
+/// rename); `keyword` filters by exact keyword shortcut. The six time
+/// bounds are ISO `YYYY-MM-DD[ HH:MM:SS]` UTC strings — a bare date means
+/// "start of that day" for the `*_after` bounds and "end of that day" for
+/// `*_before`, and both ends are inclusive. They compare lexicographically
+/// (safe: the format is fixed-width). A `NULL last_visited_at` (never
+/// visited) matches `last_visited_before` but never `last_visited_after`.
+///
+/// This one struct feeds `list`, `count`, `select_ids`, and
+/// `remove_matching` — they all build their WHERE clause from the same
+/// shared helper and MUST keep matching or the `x-total-count` header
+/// drifts from the real array length (and bulk deletes hit the wrong rows).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct BookmarkFilter {
+	pub category: Option<String>,
+	pub category_id: Option<i64>,
+	pub tag: Option<String>,
+	pub keyword: Option<String>,
+	pub starred: Option<bool>,
+	pub archived: Option<bool>,
+	pub trash: bool,
+	pub created_after: Option<String>,
+	pub created_before: Option<String>,
+	pub updated_after: Option<String>,
+	pub updated_before: Option<String>,
+	pub last_visited_after: Option<String>,
+	pub last_visited_before: Option<String>,
+	pub trashed_after: Option<String>,
+	pub trashed_before: Option<String>,
+	pub limit: Option<i64>,
+	pub offset: Option<i64>,
+	/// Keyset pagination bound: the `(created_at, id)` of the last row of the
+	/// previous page, as `(created_at, id) < (?, ?)`. Consumed by `list` only
+	/// — `count`/`select_ids`/`remove_matching` must NOT see it (a cursor
+	/// describes a *page*, not a filter, so totals stay whole-corpus). The
+	/// HTTP layer decodes it from an opaque `X-Next-Cursor` token.
+	pub before_cursor: Option<(String, i64)>,
+}
