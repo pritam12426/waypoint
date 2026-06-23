@@ -98,3 +98,151 @@ fn is_blocked_v6(ip: &Ipv6Addr) -> bool {
 }
 
 /// True when `ip` must never be a fetch target.
+fn is_blocked_ip(ip: &IpAddr) -> bool {
+	match ip {
+		IpAddr::V4(v4) => is_blocked_v4(v4),
+		IpAddr::V6(v6) => is_blocked_v6(v6),
+	}
+}
+
+/// Resolver that refuses to hand ureq a private, loopback, or link-local
+/// address. Wraps the OS [`DefaultResolver`] (same DNS, same timeout
+/// behavior) and filters the resolved set down to public addresses.
+///
+/// ureq calls this once per `connect()`, and every redirect hop re-enters
+/// `connect()` — so the guard applies to the *final* destination of a
+/// redirect chain, not just the URL the caller asked for.
+#[derive(Debug, Default)]
+pub(crate) struct SsrfResolver(DefaultResolver);
+
+impl Resolver for SsrfResolver {
+	fn resolve(
+		&self,
+		uri: &Uri,
+		config: &Config,
+		timeout: NextTimeout,
+	) -> Result<ResolvedSocketAddrs, ureq::Error> {
+		// Fail fast on hostnames that name a local machine.
+		if let Some(host) = uri.host()
+			&& is_blocked_host(host)
+		{
+			return Err(ureq::Error::BadUri(format!(
+				"refusing to connect to blocked host {host:?}"
+			)));
+		}
+		let addrs = self.0.resolve(uri, config, timeout)?;
+		let mut public =
+			ResolvedSocketAddrs::from_fn(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+		for addr in &addrs {
+			if !is_blocked_ip(&addr.ip()) {
+				public.push(*addr);
+			}
+		}
+		if public.is_empty() {
+			return Err(ureq::Error::BadUri(
+				"refusing to connect: destination resolves to a private or loopback address"
+					.to_string(),
+			));
+		}
+		Ok(public)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn parse(ip: &str) -> IpAddr {
+		ip.parse().unwrap()
+	}
+
+	// Every network class the fetch engine must never touch.
+	#[test]
+	fn blocked_ipv4_ranges() {
+		for ip in [
+			"0.0.0.0",
+			"10.0.0.1",
+			"10.255.255.255",
+			"127.0.0.1",
+			"127.8.8.8",
+			"169.254.169.254",
+			"169.254.1.1",
+			"172.16.0.1",
+			"172.31.255.255",
+			"192.168.0.1",
+			"192.168.255.255",
+			"100.64.0.1",
+			"100.127.255.255",
+			"192.0.0.1",
+			"192.0.2.1",
+			"198.18.0.1",
+			"198.51.100.1",
+			"203.0.113.1",
+			"240.0.0.1",
+			"255.255.255.255",
+		] {
+			assert!(is_blocked_ip(&parse(ip)), "{ip} should be blocked");
+		}
+	}
+
+	#[test]
+	fn blocked_ipv6_ranges() {
+		for ip in [
+			"::",
+			"::1",
+			"fe80::1",
+			"fec0::1",
+			"fc00::1",
+			"fd12::1",
+			"ff02::1",
+			"::ffff:127.0.0.1",
+			"::ffff:10.1.2.3",
+			"::ffff:169.254.169.254",
+			"::10.0.0.1",
+		] {
+			assert!(is_blocked_ip(&parse(ip)), "{ip} should be blocked");
+		}
+	}
+
+	// Public addresses must always survive the filter.
+	#[test]
+	fn allowed_public_addresses() {
+		for ip in [
+			"8.8.8.8",
+			"1.1.1.1",
+			"93.184.216.34",
+			"2001:4860:4860::8888",
+			"2606:4700::6810:84e5",
+		] {
+			assert!(!is_blocked_ip(&parse(ip)), "{ip} should be allowed");
+		}
+	}
+
+	#[test]
+	fn blocked_hostnames() {
+		for host in [
+			"localhost",
+			"foo.localhost",
+			"printer.local",
+			"db.internal",
+			"router.home.arpa",
+		] {
+			assert!(is_blocked_host(host), "{host} should be blocked");
+		}
+		for host in [
+			"example.com",
+			"example.com.localhost.evil.com",
+			"cdn.example",
+		] {
+			assert!(!is_blocked_host(host), "{host} should be allowed");
+		}
+	}
+
+	// The bracket form used in IPv6 literals must be stripped before the
+	// hostname check (it is not a hostname, but must not be rejected either).
+	#[test]
+	fn blocked_host_brackets() {
+		assert!(!is_blocked_host("[2001:db8::1]"));
+		assert!(!is_blocked_host("[::1]"));
+	}
+}
