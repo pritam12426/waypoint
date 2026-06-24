@@ -188,3 +188,227 @@ fn store() -> &'static Mutex<Store> {
 /// temp dir.
 pub fn cache_dir() -> PathBuf {
 	if cfg!(test) {
+		static FALLBACK: OnceLock<PathBuf> = OnceLock::new();
+		FALLBACK
+			.get_or_init(|| {
+				let dir = std::env::temp_dir()
+					.join(format!("waypoint-test-cache-{}", std::process::id()));
+				let _ = fs::create_dir_all(&dir);
+				dir
+			})
+			.clone()
+	} else if let Some(dir) = std::env::var_os("WAYPOINTD_CACHE_DIR") {
+		PathBuf::from(dir)
+	} else {
+		dirs::cache_dir()
+			.map(|dir| dir.join("waypoint"))
+			.unwrap_or_else(|| std::env::temp_dir().join("waypoint-cache"))
+	}
+}
+
+/// Full path of the cache file.
+pub fn cache_file() -> PathBuf {
+	cache_dir().join(FILE_NAME)
+}
+
+/// Looks a cached result up. An expired (or absent) entry returns `None`;
+/// the stale entry is dropped from memory so a later save can't persist it.
+pub fn get(target: MediaTarget, url: &str) -> Option<String> {
+	let now = now_millis();
+	let mut store = store()
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner());
+	let map = store.map_for(target);
+	match map.get(url) {
+		Some(entry) if entry.expires_at > now => Some(entry.value.clone()),
+		_ => {
+			map.remove(url);
+			None
+		}
+	}
+}
+
+/// Stores a successful fetch result under the default TTL and persists it.
+pub fn put(target: MediaTarget, url: &str, value: &str) {
+	put_with_ttl(target, url, value, DEFAULT_TTL_SECS);
+}
+
+/// Stores a result with an explicit TTL in *seconds* (the default path
+/// funnels through here so expiry is testable without a clock); timestamps
+/// are stored in milliseconds.
+fn put_with_ttl(target: MediaTarget, url: &str, value: &str, ttl_secs: u64) {
+	let now = now_millis();
+	let mut store = store()
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner());
+	store.map_for(target).insert(
+		url.to_string(),
+		Entry::new(value.to_string(), now, ttl_secs.saturating_mul(1000)),
+	);
+	if store.len() > MAX_ENTRIES {
+		store.purge_expired(now);
+		store.trim_oldest(MAX_ENTRIES);
+	}
+	save(&store);
+}
+
+/// Drops every cached entry for a URL (both targets) and persists the
+/// change. Used by `update --refresh` before re-resolving.
+pub fn evict(url: &str) {
+	let mut store = store()
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner());
+	let removed = store.favicon.remove(url).is_some() || store.thumbnail.remove(url).is_some();
+	if removed {
+		save(&store);
+	}
+}
+
+/// Reads the cache file into memory. A missing file is a fresh store; an
+/// unreadable or version-mismatched file is logged and treated as empty.
+fn load() -> Store {
+	load_from(&cache_file())
+}
+
+/// The path-aware half of [`load`], so tests can point at a temp file.
+fn load_from(path: &Path) -> Store {
+	let bytes = match fs::read(path) {
+		Ok(bytes) => bytes,
+		Err(_) => return Store::default(),
+	};
+	match serde_json::from_slice::<FileFormat>(&bytes) {
+		Ok(file) if file.version == CACHE_VERSION => {
+			let mut store = Store {
+				favicon: file.favicon,
+				thumbnail: file.thumbnail,
+			};
+			store.purge_expired(now_millis());
+			// A file written before the precise cap (or hand-edited) can
+			// arrive over `MAX_ENTRIES`; trim on load too, not just on put.
+			store.trim_oldest(MAX_ENTRIES);
+			store
+		}
+		_ => {
+			crate::log_warn!(
+				"cache: ignoring unreadable or outdated cache file at {}",
+				path.display()
+			);
+			Store::default()
+		}
+	}
+}
+
+/// Atomically writes the store to disk: write a temp file, then rename it
+/// over the real file. A crash mid-write leaves the old file intact.
+fn save(store: &Store) {
+	save_to(store, &cache_file())
+}
+
+/// The path-aware half of [`save`], so tests can write to a temp file.
+fn save_to(store: &Store, path: &Path) {
+	if let Some(parent) = path.parent()
+		&& !parent.is_dir()
+		&& let Err(err) = fs::create_dir_all(parent)
+	{
+		crate::log_warn!("cache: cannot create cache dir {}: {err}", parent.display());
+		return;
+	}
+	let json = match serde_json::to_string(&FileFormat::current(store)) {
+		Ok(json) => json,
+		Err(err) => {
+			crate::log_warn!("cache: failed to serialize cache: {err}");
+			return;
+		}
+	};
+	let tmp = path.with_extension(format!("{}.{}.tmp", FILE_NAME, std::process::id()));
+	if let Err(err) = fs::write(&tmp, &json) {
+		crate::log_warn!("cache: cannot write {}: {err}", tmp.display());
+		return;
+	}
+	if let Err(err) = fs::rename(&tmp, path) {
+		crate::log_warn!(
+			"cache: cannot move {} → {}: {err}",
+			tmp.display(),
+			path.display()
+		);
+		let _ = fs::remove_file(&tmp);
+	}
+}
+
+/// Unix epoch **milliseconds**, the timestamp basis for `Entry` lifetime
+/// fields (second resolution could not order writes within the same second).
+fn now_millis() -> u64 {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_millis() as u64)
+		.unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn tmp_dir(tag: &str) -> PathBuf {
+		std::env::temp_dir().join(format!("waypoint-cache-test-{tag}-{}", std::process::id()))
+	}
+
+	// --- Store-level logic (no filesystem, no singleton) ---
+
+	#[test]
+	fn store_roundtrip_and_evict() {
+		let mut store = Store::default();
+		store.map_for(MediaTarget::Favicon).insert(
+			"https://a.example/".into(),
+			Entry::new("https://a.example/favicon.ico".into(), 100, 100),
+		);
+		store.map_for(MediaTarget::Thumbnail).insert(
+			"https://a.example/".into(),
+			Entry::new("https://a.example/og.png".into(), 100, 100),
+		);
+
+		assert_eq!(store.len(), 2);
+		assert_eq!(
+			store
+				.favicon
+				.get("https://a.example/")
+				.map(|e| e.value.as_str()),
+			Some("https://a.example/favicon.ico")
+		);
+		assert_eq!(
+			store
+				.thumbnail
+				.get("https://a.example/")
+				.map(|e| e.value.as_str()),
+			Some("https://a.example/og.png")
+		);
+
+		store.favicon.remove("https://a.example/");
+		store.thumbnail.remove("https://a.example/");
+		assert!(store.is_empty());
+	}
+
+	#[test]
+	fn purge_expired_drops_only_stale() {
+		let mut store = Store::default();
+		let now = 1_000;
+		store.favicon.insert(
+			"fresh".into(),
+			Entry::new("https://x/f.ico".into(), now, 60),
+		);
+		store.favicon.insert(
+			"stale".into(),
+			Entry::new("https://y/f.ico".into(), now - 120, 60),
+		);
+		store.thumbnail.insert(
+			"stale".into(),
+			Entry::new("https://y/og.png".into(), now - 120, 60),
+		);
+
+		store.purge_expired(now);
+
+		assert_eq!(store.favicon.len(), 1);
+		assert!(store.favicon.contains_key("fresh"));
+		assert!(store.thumbnail.is_empty());
+	}
+
+	#[test]
