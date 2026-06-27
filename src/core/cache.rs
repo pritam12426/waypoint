@@ -412,3 +412,151 @@ mod tests {
 	}
 
 	#[test]
+	fn trim_oldest_drops_the_oldest() {
+		let mut store = Store::default();
+		for i in 0..4 {
+			store.favicon.insert(
+				format!("u{i}"),
+				Entry::new(format!("https://u{i}/f.ico"), 100 + i, 1000),
+			);
+		}
+
+		store.trim_oldest(2);
+
+		// The two newest (created_at 102, 103) survive; the two oldest go.
+		assert_eq!(store.favicon.len(), 2);
+		assert!(store.favicon.contains_key("u2"));
+		assert!(store.favicon.contains_key("u3"));
+	}
+
+	// The cap counts each (target, url) pair: a URL's favicon and thumbnail
+	// are distinct entries, and entries sharing a `created_at` must not let
+	// extra entries slip past the cap (the old timestamp-cutoff bug).
+	#[test]
+	fn trim_oldest_counts_targets_and_breaks_ties() {
+		let mut store = Store::default();
+		// Favicon entries all "created" at the same tick.
+		for i in 0..4 {
+			store.favicon.insert(
+				format!("same-{i}"),
+				Entry::new(format!("https://u{i}/f.ico"), 500, 1000),
+			);
+		}
+		// The same URL also has a thumbnail, newer by one tick.
+		store.thumbnail.insert(
+			"same-0".to_string(),
+			Entry::new("https://u0/o.png".to_string(), 501, 1000),
+		);
+
+		store.trim_oldest(2);
+
+		// The thumbnail (newest tick) + one favicon survive; the favicon of
+		// `same-0` is evicted even though its URL survived as a thumbnail.
+		assert_eq!(store.len(), 2);
+		assert!(store.thumbnail.contains_key("same-0"));
+		let favicons: Vec<_> = store.favicon.keys().cloned().collect();
+		assert_eq!(favicons.len(), 1);
+	}
+
+	// --- File I/O (Store ↔ JSON on a tempdir) ---
+
+	#[test]
+	fn save_then_load_roundtrips() {
+		let dir = tmp_dir("roundtrip");
+		let _ = fs::remove_dir_all(&dir);
+		let path = dir.join(FILE_NAME);
+
+		let mut store = Store::default();
+		store.favicon.insert(
+			"https://a.example/".into(),
+			Entry::new(
+				"https://a.example/favicon.ico".into(),
+				now_millis(),
+				1_000_000,
+			),
+		);
+		save_to(&store, &path);
+		// The atomic rename lands the temp file's content at `path`.
+		let reloaded = load_from(&path);
+
+		assert_eq!(reloaded.favicon.len(), 1);
+		assert_eq!(
+			reloaded
+				.favicon
+				.get("https://a.example/")
+				.map(|e| e.value.as_str()),
+			Some("https://a.example/favicon.ico")
+		);
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn missing_file_loads_empty() {
+		let path = std::env::temp_dir().join("waypoint-cache-test-missing.json");
+		let _ = fs::remove_file(&path);
+		assert!(load_from(&path).is_empty());
+	}
+
+	#[test]
+	fn corrupt_file_loads_empty() {
+		let dir = tmp_dir("corrupt");
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let path = dir.join(FILE_NAME);
+		fs::write(&path, "this is not json{{").unwrap();
+
+		assert!(load_from(&path).is_empty());
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn outdated_version_loads_empty() {
+		let dir = tmp_dir("version");
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let path = dir.join(FILE_NAME);
+		fs::write(
+			&path,
+			serde_json::to_string(&FileFormat {
+				version: CACHE_VERSION + 1,
+				favicon: HashMap::new(),
+				thumbnail: HashMap::new(),
+			})
+			.unwrap(),
+		)
+		.unwrap();
+
+		assert!(load_from(&path).is_empty());
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	// --- The process-wide singleton (URLs stay unique across tests) ---
+
+	#[test]
+	fn singleton_get_put_evict_and_expiry() {
+		// Miss → put → hit.
+		assert_eq!(get(MediaTarget::Favicon, "https://s.example/"), None);
+		put(
+			MediaTarget::Favicon,
+			"https://s.example/",
+			"https://s.example/f.ico",
+		);
+		assert_eq!(
+			get(MediaTarget::Favicon, "https://s.example/"),
+			Some("https://s.example/f.ico".into())
+		);
+
+		// A zero-TTL entry is already expired on write.
+		put_with_ttl(
+			MediaTarget::Thumbnail,
+			"https://s.example/",
+			"https://s.example/o.png",
+			0,
+		);
+		assert_eq!(get(MediaTarget::Thumbnail, "https://s.example/"), None);
+
+		// Evict drops the favicon too.
+		evict("https://s.example/");
+		assert_eq!(get(MediaTarget::Favicon, "https://s.example/"), None);
+	}
+}
