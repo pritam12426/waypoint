@@ -207,3 +207,176 @@ pub fn run(
 					// to grab the next bookmark.
 					let bm = {
 						let rx = job_rx.lock().unwrap();
+						rx.recv()
+					};
+					// `Err` means the sender was dropped → no more jobs.
+					let Ok(bm) = bm else {
+						break;
+					};
+					let outcome = if is_http_url(&bm.url) {
+						match url_is_alive(agent, &bm.url) {
+							Ok(_) => Outcome::Alive,
+							Err(reason) => Outcome::Dead(reason),
+						}
+					} else {
+						Outcome::Skipped
+					};
+					crate::log_trace!("checked #{} {:?}: {outcome:?}", bm.id, bm.url);
+					let _ = result_tx.send((bm, outcome));
+				}
+			});
+		}
+		for bm in all {
+			let _ = job_tx.send(bm);
+		}
+		// Dropping the sender tells every worker their `recv()` will never
+		// return another job, so the scope waits for all of them to wind down.
+		drop(job_tx);
+	});
+	// Dropping the remaining sender clone (held by this thread) closes the
+	// result channel, which ends the aggregator's loop.
+	drop(result_tx);
+	aggregator.join().expect("check aggregator thread panicked");
+
+	let (alive, skipped) = *counts.lock().unwrap();
+	let mut dead = dead.lock().unwrap().clone();
+	drop(counts);
+	dead.sort_by_key(|dl| dl.id);
+	let checked_n = alive + dead.len();
+	crate::log_info!(
+		"checked {checked_n} bookmarks, {skipped} skipped, {} dead",
+		dead.len()
+	);
+
+	// Deletion phase. `delete` and `hard_delete` are mutually exclusive by
+	// contract, but handling both here makes the function robust to direct
+	// callers. `trash` is recoverable; `purge` is not.
+	let mut deleted = 0;
+	if delete {
+		for dl in &dead {
+			bookmarks::trash(conn, dl.id)?;
+			crate::log_info!("moved bookmark #{} to trash (dead link)", dl.id);
+			deleted += 1;
+		}
+	}
+	if hard_delete {
+		for dl in &dead {
+			bookmarks::purge(conn, dl.id)?;
+			crate::log_info!("purged bookmark #{} (dead link)", dl.id);
+			deleted += 1;
+		}
+	}
+
+	Ok(CheckReport {
+		checked: checked_n,
+		alive,
+		skipped,
+		deleted,
+		dead,
+	})
+}
+
+/// Checks a single bookmark by id and returns its liveness verdict. Returns
+/// `Ok(None)` when the id doesn't exist or the bookmark is trashed — the
+/// batch run only ever checks active bookmarks, so the single check mirrors
+/// that boundary. Uses the same probe rules as `run` (`url_is_alive`).
+pub fn check_one(conn: &Connection, id: i64) -> Result<Option<CheckVerdict>> {
+	let Some(bm) = bookmarks::get(conn, id)? else {
+		return Ok(None);
+	};
+	if bm.trashed_at.is_some() {
+		return Ok(None);
+	}
+	let agent = agent();
+	let verdict = if is_http_url(&bm.url) {
+		match url_is_alive(&agent, &bm.url) {
+			Ok(()) => CheckVerdict::Alive,
+			Err(reason) => CheckVerdict::Dead { reason },
+		}
+	} else {
+		CheckVerdict::Skipped
+	};
+	Ok(Some(verdict))
+}
+
+/// Returns `Ok(())` if the URL answers with a success status (2xx/3xx —
+/// redirects are followed by ureq), `Err(reason)` if it's dead.
+fn url_is_alive(agent: &Agent, url: &str) -> Result<(), String> {
+	match agent.head(url).call() {
+		Ok(_) => Ok(()),
+		// HEAD is optional per RFC 7231 — when a server refuses the
+		// method (405/501) retry with GET instead of counting the link dead.
+		Err(ureq::Error::StatusCode(405 | 501)) => match agent.get(url).call() {
+			Ok(_) => Ok(()),
+			Err(e) => Err(reason(&e)),
+		},
+		Err(e) => Err(reason(&e)),
+	}
+}
+
+/// Turns a ureq error into the short human reason shown next to a dead
+/// link. Status codes are the important case (`HTTP 404`); timeouts and
+/// transport errors get words instead of a wall of internal error text.
+fn reason(e: &ureq::Error) -> String {
+	match e {
+		ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+		ureq::Error::Timeout(_) => "timed out".to_string(),
+		other => other.to_string(),
+	}
+}
+
+/// Builds the ureq agent with a fixed overall timeout budget (DNS, connect,
+/// and global). One agent is shared by all workers — ureq agents are cheap
+/// and thread-safe. The shared [`SsrfResolver`] is wired in so probing a
+/// user-saved URL can never reach a loopback/private/link-local address —
+/// same policy as the media fetch engine.
+fn agent() -> Agent {
+	let config = Config::builder()
+		.timeout_global(Some(TIMEOUT))
+		.timeout_connect(Some(TIMEOUT))
+		.timeout_resolve(Some(TIMEOUT))
+		.build();
+	Agent::with_parts(config, DefaultConnector::default(), SsrfResolver::default())
+}
+
+/// Dead-link report as CSV (id, title, url, reason).
+pub fn report_csv(report: &CheckReport) -> String {
+	let mut out = String::from("id,title,url,reason\n");
+	for dl in &report.dead {
+		out.push_str(&format!(
+			"{},{},{},{}\n",
+			dl.id,
+			csv_field(&dl.title),
+			csv_field(&dl.url),
+			csv_field(&dl.reason),
+		));
+	}
+	out
+}
+
+/// Quotes a CSV field when it contains a comma, quote, or newline, doubling
+/// any embedded quotes (RFC 4180).
+fn csv_field(s: &str) -> String {
+	if s.chars().any(|c| matches!(c, ',' | '"' | '\n' | '\r')) {
+		format!("\"{}\"", s.replace('"', "\"\""))
+	} else {
+		s.to_string()
+	}
+}
+
+/// Dead-link report as Markdown, with the run's headline numbers in the
+/// intro paragraph.
+pub fn report_markdown(report: &CheckReport) -> String {
+	let mut out = String::from("# Dead Links\n\n");
+	out.push_str(&format!(
+		"{} bookmarks checked, {} dead, {} skipped, {} deleted\n\n",
+		report.checked,
+		report.dead.len(),
+		report.skipped,
+		report.deleted,
+	));
+	for dl in &report.dead {
+		out.push_str(&format!("- [{}]({}) — {}\n", dl.title, dl.url, dl.reason));
+	}
+	out
+}
