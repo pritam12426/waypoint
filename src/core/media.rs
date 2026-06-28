@@ -162,3 +162,152 @@ fn host_matches(url_host: &str, suffix: &str) -> bool {
 /// slice the *first* rule whose target/host/path all match is used. Because
 /// matching is host suffix + path prefix, a URL with no host (`None` here)
 /// simply never matches anything.
+fn first_match(url: &str, target: MediaTarget) -> Option<String> {
+	let (_scheme, host) = scheme_and_host(url);
+	let host = host?;
+	let path = path_of(url);
+	for rules in SITE_RULES {
+		for rule in *rules {
+			if rule.target == target
+				&& host_matches(host, rule.host_suffix)
+				&& rule
+					.path_prefix
+					.is_none_or(|prefix| path.starts_with(prefix))
+			{
+				let extracted = (rule.extract)(url);
+				crate::log_trace!(
+					"{target:?} rule host={:?} prefix={:?} matched {url:?} → {extracted:?}",
+					rule.host_suffix,
+					rule.path_prefix,
+				);
+				return extracted;
+			}
+		}
+	}
+	crate::log_trace!("no {target:?} rule matched {url:?}");
+	None
+}
+
+/// Generic last-resort favicon for any site: `{scheme}://{host}/favicon.ico`.
+/// Only reached when no favicon rule matched.
+///
+/// Falls back to `https` when the URL had no explicit scheme, so even a
+/// scheme-less URL gets a sensible favicon. Unlike `scheme_and_host`, the
+/// authority keeps its `:port` — a `127.0.0.1:8080` dev server's generic
+/// favicon must point back at the same port, not drop it.
+///
+/// `pub(crate)` so `core::fetch` could use it as the last-resort for a
+/// page with no `<link rel=icon>`.
+pub(crate) fn fallback_favicon(url: &str) -> Option<String> {
+	let (scheme, rest) = match url.split_once("://") {
+		Some((s, r)) => (Some(s), r),
+		None => (None, url),
+	};
+	// Authority = the first `host[:port]` run after the scheme, userinfo
+	// (before the last `@`) stripped.
+	let authority_and_rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+	let authority = authority_and_rest
+		.rsplit('@')
+		.next()
+		.unwrap_or(authority_and_rest);
+	let authority = authority.trim();
+	if authority.is_empty() {
+		crate::log_warn!(
+			"cannot derive a default favicon for {url:?}: the URL has no recognizable host"
+		);
+		return None;
+	}
+	Some(format!(
+		"{}://{authority}/favicon.ico",
+		scheme.unwrap_or("https")
+	))
+}
+
+/// Resolves a favicon URL: a rule may override it (a channel-icon extractor,
+/// a known CDN path, ...), otherwise the domain's `/favicon.ico` is used.
+pub fn favicon(url: &str) -> Option<String> {
+	crate::log_trace!("resolving favicon for {url:?}");
+	let resolved = first_match(url, MediaTarget::Favicon).or_else(|| fallback_favicon(url));
+	crate::log_trace!("favicon resolved for {url:?} → {resolved:?}");
+	resolved
+}
+
+/// Resolves *only* the generic default favicon: `{scheme}://{host}/favicon.ico`,
+/// never a site-specific/custom rule. This is what `--no-custom-favicon`
+/// stores — a bookmark that must never pick up a custom channel icon or
+/// vendor path, just the plain domain favicon.
+pub fn default_favicon(url: &str) -> Option<String> {
+	crate::log_trace!(
+		"resolving *generic* favicon for {url:?} (--no-custom-favicon path, rules skipped)"
+	);
+	let resolved = fallback_favicon(url);
+	crate::log_trace!("generic favicon resolved for {url:?} → {resolved:?}");
+	resolved
+}
+
+/// Resolves a thumbnail URL. Stays `None` for everything without a matching
+/// thumbnail rule — most bookmarks simply have no thumbnail.
+pub fn thumbnail(url: &str) -> Option<String> {
+	crate::log_trace!("resolving thumbnail for {url:?}");
+	let resolved = first_match(url, MediaTarget::Thumbnail);
+	crate::log_trace!("thumbnail resolved for {url:?} → {resolved:?}");
+	resolved
+}
+
+/// The default (no-mode) favicon resolution. Cache-first **for any URL that
+/// matches a registered site fetcher** (`sites::SITE_FETCHERS`, `Favicon`
+/// target) — for those sites the real icon is fetched once and reused from
+/// the media cache for 90 days, so a YouTube channel/video bookmark's
+/// `favicon` column holds its channel avatar instead of the generic
+/// `youtube.com/favicon.ico`. Every other URL resolves offline through the
+/// rule table ([`favicon`]) — no network, no cache.
+///
+/// General by design: registering a new site fetcher (one module + one
+/// `SITE_FETCHERS` entry) automatically opts that site into cache-first
+/// default resolution; nothing here changes.
+///
+/// On a cache miss the site fetcher fetches the page, the resulting URL is
+/// cached (90-day TTL), and a failed fetch degrades to the offline
+/// [`favicon`] fallback. This is the pipeline the `Fetch` asset mode runs
+/// for every URL, scoped here to sites with a registered fetcher so the
+/// default save stays offline for everything else.
+pub fn resolve_favicon(url: &str) -> Option<String> {
+	crate::log_trace!("resolve_favicon: smart resolution for {url:?}");
+	if site_fetcher_matches(SITE_FETCHERS, url, MediaTarget::Favicon) {
+		fetch_favicon(url)
+	} else {
+		favicon(url)
+	}
+}
+
+/// The default (no-mode) thumbnail resolution. Cache-first for any URL that
+/// matches a registered site fetcher (`sites::SITE_FETCHERS`,
+/// `Thumbnail` target) — e.g. a YouTube video bookmark's `thumbnail` column
+/// holds the CDN thumbnail, cached after the first fetch. URLs without a
+/// matching fetcher resolve offline through the rule table ([`thumbnail`]).
+pub fn resolve_thumbnail(url: &str) -> Option<String> {
+	crate::log_trace!("resolve_thumbnail: smart resolution for {url:?}");
+	if site_fetcher_matches(SITE_FETCHERS, url, MediaTarget::Thumbnail) {
+		fetch_thumbnail(url)
+	} else {
+		thumbnail(url)
+	}
+}
+
+/// Whether any site fetcher with `target` would apply to `url` — i.e. its
+/// `matches(url)` is true. Used to decide if the cache-first network
+/// pipeline is eligible for a URL without actually running a fetch.
+fn site_fetcher_matches(fetchers: &[SiteFetcher], url: &str, target: MediaTarget) -> bool {
+	fetchers
+		.iter()
+		.any(|fetcher| fetcher.target == target && (fetcher.matches)(url))
+}
+
+/// Runs the site-specific network fetchers for one target, in table order.
+/// The first fetcher whose `target` matches, whose `matches(url)` is true,
+/// and whose `fetch(url)` produces a URL wins; a matching fetcher returning
+/// `None` (its fetch or extraction failed) falls through to the next one.
+///
+/// Extracted from `fetch_favicon`/`fetch_thumbnail` so the target-scoping
+/// and fall-through rules can be unit-tested against synthetic fetchers
+/// with no network.
