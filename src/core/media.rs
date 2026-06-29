@@ -311,3 +311,152 @@ fn site_fetcher_matches(fetchers: &[SiteFetcher], url: &str, target: MediaTarget
 /// Extracted from `fetch_favicon`/`fetch_thumbnail` so the target-scoping
 /// and fall-through rules can be unit-tested against synthetic fetchers
 /// with no network.
+fn run_site_fetchers(fetchers: &[SiteFetcher], url: &str, target: MediaTarget) -> Option<String> {
+	for fetcher in fetchers {
+		if fetcher.target != target {
+			continue;
+		}
+		if (fetcher.matches)(url) {
+			if let Some(found) = (fetcher.fetch)(url) {
+				crate::log_trace!(
+					"media: {} ({target:?}) matched {url:?} → {found:?}",
+					fetcher.name
+				);
+				return Some(found);
+			}
+			crate::log_trace!(
+				"media: {} ({target:?}) matched {url:?} but produced nothing; falling through",
+				fetcher.name
+			);
+		}
+	}
+	None
+}
+
+/// Network-assisted favicon resolution: the server fetches the page at save
+/// time, scrapes its `<link rel=icon>`, and stores the discovered absolute
+/// URL. Best-effort by design — when the fetch fails or the page has no
+/// icon link, this degrades to the plain table-driven resolution (which
+/// itself never fails for a URL with a host), so the stored favicon is
+/// always *something*.
+///
+/// Site-specific network fetchers (`sites::SITE_FETCHERS`, target
+/// `Favicon`) run first — e.g. a YouTube channel's real avatar lives inside
+/// its `ytInitialData` JSON, which a generic `<link rel=icon>` scrape can
+/// never find (the page's icon link is the *generic* YouTube favicon). A
+/// matching fetcher's URL wins; otherwise the generic scrape runs, then the
+/// rule table.
+///
+/// Successful network results are cached (see `core::cache`) so repeated
+/// saves of the same URL don't re-fetch; the offline rule-table fallback is
+/// never cached. `fetch_favicon_fresh` skips the cache read for `--refresh`.
+pub fn fetch_favicon(url: &str) -> Option<String> {
+	fetch_favicon_inner(url, false)
+}
+
+/// Like [`fetch_favicon`] but ignores any cached result and re-fetches now;
+/// the fresh result still rewrites the cache entry. Backs `update --refresh`.
+pub fn fetch_favicon_fresh(url: &str) -> Option<String> {
+	fetch_favicon_inner(url, true)
+}
+
+fn fetch_favicon_inner(url: &str, bypass: bool) -> Option<String> {
+	crate::log_trace!("fetch_favicon: scraping favicon for {url:?}");
+	if !bypass && let Some(hit) = super::cache::get(MediaTarget::Favicon, url) {
+		crate::log_trace!("fetch_favicon: cache hit for {url:?} → {hit:?}");
+		return Some(hit);
+	}
+	if let Some(found) = run_site_fetchers(SITE_FETCHERS, url, MediaTarget::Favicon) {
+		super::cache::put(MediaTarget::Favicon, url, &found);
+		return Some(found);
+	}
+	// Only genuine network results are cached; the rule-table fallback is
+	// free and must not pin a stale result into the cache.
+	match super::fetch::fetch_favicon(url) {
+		Some(found) => {
+			super::cache::put(MediaTarget::Favicon, url, &found);
+			crate::log_trace!("fetch_favicon resolved for {url:?} → {found:?}");
+			Some(found)
+		}
+		None => {
+			crate::log_trace!(
+				"fetch_favicon: no icon scraped for {url:?}, falling back to rule table"
+			);
+			favicon(url)
+		}
+	}
+}
+
+/// Network-assisted thumbnail resolution: scrapes the page's `og:image`
+/// (falling back to `twitter:image`) and stores the discovered absolute
+/// URL. Unlike `fetch_favicon` there is no guaranteed fallback — most
+/// pages have no social image, so this stays `None` when the fetch fails
+/// or the page simply has no `og:image`.
+///
+/// Site-specific network fetchers (`sites::SITE_FETCHERS`, target
+/// `Thumbnail`) run first when a site's real thumbnail hides in page JSON
+/// that a generic `og:image` scrape can't reach. A matching fetcher's URL
+/// wins; otherwise the generic scrape runs, then the rule table.
+///
+/// Successful network results are cached (see `core::cache`); `None` and
+/// the offline rule-table fallback are not. `fetch_thumbnail_fresh` skips
+/// the cache read for `--refresh`.
+pub fn fetch_thumbnail(url: &str) -> Option<String> {
+	fetch_thumbnail_inner(url, false)
+}
+
+/// Like [`fetch_thumbnail`] but ignores any cached result and re-fetches
+/// now; the fresh result still rewrites the cache entry. Backs
+/// `update --refresh`.
+pub fn fetch_thumbnail_fresh(url: &str) -> Option<String> {
+	fetch_thumbnail_inner(url, true)
+}
+
+fn fetch_thumbnail_inner(url: &str, bypass: bool) -> Option<String> {
+	crate::log_trace!("fetch_thumbnail: scraping og:image for {url:?}");
+	if !bypass && let Some(hit) = super::cache::get(MediaTarget::Thumbnail, url) {
+		crate::log_trace!("fetch_thumbnail: cache hit for {url:?} → {hit:?}");
+		return Some(hit);
+	}
+	if let Some(found) = run_site_fetchers(SITE_FETCHERS, url, MediaTarget::Thumbnail) {
+		super::cache::put(MediaTarget::Thumbnail, url, &found);
+		return Some(found);
+	}
+	// Only genuine network results are cached; the rule-table fallback is
+	// free and must not pin a stale result into the cache.
+	match super::fetch::fetch_thumbnail(url) {
+		Some(found) => {
+			super::cache::put(MediaTarget::Thumbnail, url, &found);
+			crate::log_trace!("fetch_thumbnail resolved for {url:?} → {found:?}");
+			Some(found)
+		}
+		None => {
+			crate::log_trace!(
+				"fetch_thumbnail: no og:image scraped for {url:?}, falling back to rule table"
+			);
+			thumbnail(url)
+		}
+	}
+}
+
+/// What a save resolves to and stores in the `favicon` / `thumbnail`
+/// columns. Both may be `None` (no thumbnail rule, no network result).
+///
+/// Decoupled from persistence so the HTTP layer can resolve media *before*
+/// touching the writer connection: a network fetch (cache-miss YouTube
+/// avatar, a `Fetch`-mode scrape) must never hold the write mutex. The
+/// `resolve_*` functions are the single home of the precedence logic, so
+/// every save path resolves media identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMedia {
+	pub favicon: Option<String>,
+	pub thumbnail: Option<String>,
+}
+
+/// Rejects an explicit favicon/thumbnail payload that literally equals a
+/// bundled-default token (`"\0default-favicon"` / `"\0default-thumbnail"`):
+/// it would be stored verbatim and then render as the bundled asset,
+/// silently corrupting what the user meant to store. Only enforced when the
+/// payload would actually be used — an explicit `AssetMode` arm ignores the
+/// payload entirely, so a `--mode default --favicon <token>` combo is left
+/// alone.
