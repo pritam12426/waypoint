@@ -659,3 +659,211 @@ mod tests {
 	// counter guards against an accidentally emptied table (the harness
 	// would otherwise trivially pass with zero rules).
 	#[test]
+	fn every_rule_has_passing_examples() {
+		let mut checked = 0;
+		for rules in SITE_RULES {
+			for rule in *rules {
+				for (url, expected) in rule.examples {
+					let got = (rule.extract)(url);
+					assert_eq!(
+						got.as_deref(),
+						*expected,
+						"extractor for {:?} on {url:?}",
+						rule.host_suffix
+					);
+					checked += 1;
+				}
+			}
+		}
+		// The table is never accidentally emptied.
+		assert!(checked >= 3, "only {checked} rule examples checked");
+	}
+
+	#[test]
+	fn youtube_watch_thumbnail() {
+		let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+		assert_eq!(
+			thumbnail(url).as_deref(),
+			Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+		);
+	}
+
+	// Query order must not matter to the `v` extractor.
+	#[test]
+	fn youtube_watch_with_extra_query() {
+		let url = "https://youtube.com/watch?t=30&v=AbCdEf123";
+		assert_eq!(
+			thumbnail(url).as_deref(),
+			Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg")
+		);
+	}
+
+	#[test]
+	fn youtube_shorts_thumbnail() {
+		let url = "https://www.youtube.com/shorts/AbCdEf123";
+		assert_eq!(
+			thumbnail(url).as_deref(),
+			Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg")
+		);
+	}
+
+	// Channel pages have a favicon rule that returns `None`, so resolution
+	// must fall through to the domain fallback — not stop at the rule.
+	#[test]
+	fn youtube_channel_uses_domain_fallback() {
+		let url = "https://www.youtube.com/@SomeChannel";
+		assert_eq!(
+			favicon(url).as_deref(),
+			Some("https://www.youtube.com/favicon.ico")
+		);
+		// Channel pages have no thumbnail rule.
+		assert_eq!(thumbnail(url), None);
+	}
+
+	// A site with no rules at all still gets a favicon (domain fallback)
+	// and never a thumbnail.
+	#[test]
+	fn generic_site_gets_domain_fallback() {
+		let url = "https://example.org/some/path?q=1";
+		assert_eq!(
+			favicon(url).as_deref(),
+			Some("https://example.org/favicon.ico")
+		);
+		assert_eq!(thumbnail(url), None);
+	}
+
+	// Scheme-less URLs (as pasted by a user) must still resolve; the
+	// fallback picks `https` for them.
+	#[test]
+	fn scheme_less_url_still_matches() {
+		let url = "example.org/watch?v=x";
+		assert_eq!(
+			favicon(url).as_deref(),
+			Some("https://example.org/favicon.ico")
+		);
+	}
+
+	// `default_favicon` skips the rule table entirely and always yields the
+	// domain fallback — even for a URL that carries a favicon rule (the
+	// `/@channel` rule here). This is the `--no-custom-favicon` contract.
+	#[test]
+	fn default_favicon_ignores_custom_rules() {
+		let url = "https://www.youtube.com/@SomeChannel";
+		assert_eq!(
+			default_favicon(url).as_deref(),
+			Some("https://www.youtube.com/favicon.ico")
+		);
+		assert_eq!(
+			favicon(url).as_deref(),
+			Some("https://www.youtube.com/favicon.ico")
+		);
+		let scheme_less = "example.org/path";
+		assert_eq!(
+			default_favicon(scheme_less).as_deref(),
+			Some("https://example.org/favicon.ico")
+		);
+	}
+
+	// The anti-false-positive guarantee: a `youtube.com` token anywhere in
+	// the path of a *different* host must not trigger the YouTube rule.
+	#[test]
+	fn host_suffix_does_not_cross_domains() {
+		// Host not matching is a no-match even though the path would.
+		let url = "https://evil.example/youtube.com/watch?v=dQw4w9WgXcQ";
+		assert_eq!(thumbnail(url), None);
+		assert_eq!(
+			favicon(url).as_deref(),
+			Some("https://evil.example/favicon.ico")
+		);
+	}
+
+	// Subdomains match the suffix, but a sibling domain whose name merely
+	// *ends in* the suffix does not.
+	#[test]
+	fn subdomain_matches_but_sibling_domain_does_not() {
+		assert!(thumbnail("https://www.youtube.com/watch?v=a").is_some());
+		assert!(thumbnail("https://m.youtube.com/watch?v=a").is_some());
+		assert_eq!(
+			thumbnail("https://youtube.com.evil.example/watch?v=a"),
+			None
+		);
+	}
+
+	// Hosts are case-insensitive on the wire.
+	#[test]
+	fn host_matching_is_case_insensitive() {
+		assert!(thumbnail("https://www.YOUTUBE.COM/watch?v=a").is_some());
+	}
+
+	// `fetch_favicon` degrades to the domain fallback when the network
+	// fetch fails. Port 1 is almost never listening — connecting to it gets
+	// a quick connection-refused, so this test needs no network or flaky
+	// public service. The fallback contract: a favicon is always stored.
+	#[test]
+	fn fetch_favicon_falls_back_on_connection_refused() {
+		let url = "http://127.0.0.1:1/";
+		assert_eq!(
+			fetch_favicon(url).as_deref(),
+			Some("http://127.0.0.1:1/favicon.ico")
+		);
+		// And the scraped thumbnail stays None — no site fetcher or offline
+		// rule matches 127.0.0.1, and the generic scrape fails.
+		assert_eq!(fetch_thumbnail(url), None);
+	}
+
+	// A cached successful fetch short-circuits the network: prepopulate the
+	// cache for a connection-refused URL and assert the stored value comes
+	// back untouched. This proves `fetch_*` consult `core::cache` before
+	// hitting the network.
+	#[test]
+	fn fetch_favicon_serves_cached_results_without_network() {
+		let url = "http://127.0.0.1:1/cached-favicon";
+		crate::core::cache::evict(url);
+		crate::core::cache::put(MediaTarget::Favicon, url, "https://cached.example/icon.png");
+		assert_eq!(
+			fetch_favicon(url).as_deref(),
+			Some("https://cached.example/icon.png")
+		);
+		// The thumbnail cache is independent (target-scoped).
+		crate::core::cache::put(
+			MediaTarget::Thumbnail,
+			url,
+			"https://cached.example/poster.jpg",
+		);
+		assert_eq!(
+			fetch_thumbnail(url).as_deref(),
+			Some("https://cached.example/poster.jpg")
+		);
+
+		// `--refresh` bypasses the cache read; the fetch fails (connection
+		// refused) and degrades to the domain fallback...
+		assert_eq!(
+			fetch_favicon_fresh(url).as_deref(),
+			Some("http://127.0.0.1:1/favicon.ico")
+		);
+		// ...but the offline fallback is *not* cached, so the earlier
+		// successful value is still served afterwards.
+		assert_eq!(
+			fetch_favicon(url).as_deref(),
+			Some("https://cached.example/icon.png")
+		);
+	}
+
+	// --- default resolution (`resolve_*`, cache-first for YouTube) -------
+
+	// Non-YouTube sites stay fully offline — `resolve_*` is identical to
+	// the plain rule-table resolution for them.
+	#[test]
+	fn resolve_non_youtube_stays_offline() {
+		let url = "https://example.org/some/path?q=1";
+		assert_eq!(
+			resolve_favicon(url).as_deref(),
+			Some("https://example.org/favicon.ico")
+		);
+		assert_eq!(resolve_thumbnail(url), None);
+	}
+
+	// A cached successful YouTube resolution is copied straight out of the
+	// cache — no network, no fetcher. This is the "always check the cache
+	// first" contract for channel *and* video URLs.
+	#[test]
