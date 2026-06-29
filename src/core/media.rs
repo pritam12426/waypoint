@@ -867,3 +867,189 @@ mod tests {
 	// cache — no network, no fetcher. This is the "always check the cache
 	// first" contract for channel *and* video URLs.
 	#[test]
+	fn resolve_serves_cached_youtube_media_without_network() {
+		let video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+		crate::core::cache::evict(video);
+		crate::core::cache::put(
+			MediaTarget::Favicon,
+			video,
+			"https://yt3.googleusercontent.com/cached-avatar",
+		);
+		crate::core::cache::put(
+			MediaTarget::Thumbnail,
+			video,
+			"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+		);
+		assert_eq!(
+			resolve_favicon(video).as_deref(),
+			Some("https://yt3.googleusercontent.com/cached-avatar")
+		);
+		assert_eq!(
+			resolve_thumbnail(video).as_deref(),
+			Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+		);
+
+		let channel = "https://www.youtube.com/@CachedChannel";
+		crate::core::cache::evict(channel);
+		crate::core::cache::put(
+			MediaTarget::Favicon,
+			channel,
+			"https://yt3.googleusercontent.com/cached-channel",
+		);
+		assert_eq!(
+			resolve_favicon(channel).as_deref(),
+			Some("https://yt3.googleusercontent.com/cached-channel")
+		);
+	}
+
+	// Channel pages have no thumbnail; the default resolution must not go
+	// to the network (or the rule table) to conclude that.
+	#[test]
+	fn resolve_channel_thumbnail_stays_offline() {
+		let channel = "https://www.youtube.com/@SomeChannel";
+		assert_eq!(resolve_thumbnail(channel), None);
+	}
+
+	// --- site fetcher target-scoped dispatch -----------------------------
+
+	fn fav_match(url: &str) -> bool {
+		url.contains("fav.site")
+	}
+
+	fn fav_fetch(_url: &str) -> Option<String> {
+		Some("https://fav.site/icon.png".to_string())
+	}
+
+	fn thumb_match(url: &str) -> bool {
+		url.contains("thumb.site")
+	}
+
+	fn thumb_fetch(_url: &str) -> Option<String> {
+		Some("https://thumb.site/poster.jpg".to_string())
+	}
+
+	#[test]
+	fn site_fetchers_are_target_scoped() {
+		let fetchers: &[SiteFetcher] = &[
+			SiteFetcher {
+				name: "favicon-only",
+				target: MediaTarget::Favicon,
+				matches: fav_match,
+				fetch: fav_fetch,
+			},
+			SiteFetcher {
+				name: "thumb-only",
+				target: MediaTarget::Thumbnail,
+				matches: thumb_match,
+				fetch: thumb_fetch,
+			},
+		];
+		// A favicon-target fetcher resolves favicons but is ignored for
+		// thumbnails, and vice versa.
+		assert_eq!(
+			run_site_fetchers(fetchers, "https://fav.site/x", MediaTarget::Favicon),
+			Some("https://fav.site/icon.png".to_string())
+		);
+		assert_eq!(
+			run_site_fetchers(fetchers, "https://fav.site/x", MediaTarget::Thumbnail),
+			None
+		);
+		assert_eq!(
+			run_site_fetchers(fetchers, "https://thumb.site/y", MediaTarget::Thumbnail),
+			Some("https://thumb.site/poster.jpg".to_string())
+		);
+		assert_eq!(
+			run_site_fetchers(fetchers, "https://thumb.site/y", MediaTarget::Favicon),
+			None
+		);
+	}
+
+	// `site_fetcher_matches` is the generality switch behind `resolve_*`:
+	// it answers "would a registered fetcher handle this URL?" without
+	// running any fetch. A future site is one `SiteFetcher` entry away from
+	// getting cache-first default resolution.
+	#[test]
+	fn site_fetcher_matches_checks_url_without_fetching() {
+		fn fetches_anything(_url: &str) -> Option<String> {
+			panic!("site_fetcher_matches must not run the fetcher")
+		}
+		let fetchers: &[SiteFetcher] = &[SiteFetcher {
+			name: "new-site",
+			target: MediaTarget::Favicon,
+			matches: fav_match,
+			fetch: fetches_anything,
+		}];
+		assert!(site_fetcher_matches(
+			fetchers,
+			"https://fav.site/anything",
+			MediaTarget::Favicon
+		));
+		assert!(!site_fetcher_matches(
+			fetchers,
+			"https://other.site/anything",
+			MediaTarget::Favicon
+		));
+		assert!(!site_fetcher_matches(
+			fetchers,
+			"https://fav.site/anything",
+			MediaTarget::Thumbnail
+		));
+	}
+
+	// A matching fetcher returning `None` (fetch failed) falls through to
+	// the next fetcher, and a non-matching host is skipped entirely.
+	#[test]
+	fn site_fetchers_fall_through_on_none() {
+		fn always_match(_url: &str) -> bool {
+			true
+		}
+		fn sometimes(_url: &str) -> Option<String> {
+			None
+		}
+		fn fallback(_url: &str) -> Option<String> {
+			Some("https://fallback.site/ok.png".to_string())
+		}
+		fn never_match(_url: &str) -> bool {
+			false
+		}
+		fn should_not_run(_url: &str) -> Option<String> {
+			panic!("a non-matching fetcher must not be consulted")
+		}
+		let fetchers: &[SiteFetcher] = &[
+			SiteFetcher {
+				name: "first",
+				target: MediaTarget::Thumbnail,
+				matches: always_match,
+				fetch: sometimes,
+			},
+			SiteFetcher {
+				name: "second",
+				target: MediaTarget::Thumbnail,
+				matches: always_match,
+				fetch: fallback,
+			},
+			SiteFetcher {
+				name: "never",
+				target: MediaTarget::Thumbnail,
+				matches: never_match,
+				fetch: should_not_run,
+			},
+		];
+		assert_eq!(
+			run_site_fetchers(fetchers, "https://anything.site/x", MediaTarget::Thumbnail),
+			Some("https://fallback.site/ok.png".to_string())
+		);
+	}
+
+	// The real table's YouTube entry is a Favicon-target fetcher, so a
+	// channel URL under the Thumbnail target is skipped by the target guard
+	// without touching the network.
+	#[test]
+	fn youtube_fetcher_is_favicon_target_only() {
+		let url = "https://www.youtube.com/@SomeChannel";
+		assert_eq!(
+			run_site_fetchers(SITE_FETCHERS, url, MediaTarget::Thumbnail),
+			None
+		);
+	}
+}
