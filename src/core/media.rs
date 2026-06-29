@@ -460,3 +460,202 @@ pub struct ResolvedMedia {
 /// payload would actually be used — an explicit `AssetMode` arm ignores the
 /// payload entirely, so a `--mode default --favicon <token>` combo is left
 /// alone.
+fn reject_token_collision(
+	kind: &str,
+	mode: Option<AssetMode>,
+	value: Option<&str>,
+) -> Result<(), String> {
+	if mode.is_none() && matches!(value, Some(DEFAULT_FAVICON) | Some(DEFAULT_THUMBNAIL)) {
+		crate::log_error!("refusing {kind} value that collides with the bundled-default token");
+		return Err(format!(
+			"{kind} must not equal the internal bundled-default token"
+		));
+	}
+	Ok(())
+}
+
+/// Resolves the favicon/thumbnail for a *new* bookmark from its fields and
+/// URL. Precedence, highest first:
+///   1. an explicit asset mode (`favicon_mode` / `thumbnail_mode`) —
+///      `Auto` re-derives, `Default` stores the bundled-asset token,
+///      `Fetch` has the server scrape the page at save time;
+///   2. an explicit payload value (the HTTP body, an import) still wins
+///      over the derivation;
+///   3. the empty string is the "no custom media" sentinel: favicon falls
+///      back to the *generic* domain `favicon.ico` (skipping site-specific
+///      rules), thumbnail stays `None`;
+///   4. otherwise auto-derived (cache-first for site-fetcher URLs).
+pub fn resolve_new(new: &NewBookmark) -> Result<ResolvedMedia, String> {
+	reject_token_collision("favicon", new.favicon_mode, new.favicon.as_deref())?;
+	reject_token_collision("thumbnail", new.thumbnail_mode, new.thumbnail.as_deref())?;
+
+	let favicon_source = match new.favicon_mode {
+		Some(AssetMode::Auto) => "mode=auto",
+		Some(AssetMode::Default) => "mode=default",
+		Some(AssetMode::Fetch) => "mode=fetch",
+		None if new.favicon.as_deref() == Some("") => {
+			"default-favicon sentinel (--no-custom-favicon)"
+		}
+		None if new.favicon.is_some() => "explicit payload",
+		None => "auto-derived",
+	};
+	let thumbnail_source = match new.thumbnail_mode {
+		Some(AssetMode::Auto) => "mode=auto",
+		Some(AssetMode::Default) => "mode=default",
+		Some(AssetMode::Fetch) => "mode=fetch",
+		None if new.thumbnail.as_deref() == Some("") => "no-thumbnail sentinel (--no-thumbnail)",
+		None if new.thumbnail.is_some() => "explicit payload",
+		None => "auto-derived",
+	};
+	crate::log_trace!(
+		"resolving media for new bookmark ({url:?}): favicon {favicon_source}, thumbnail {thumbnail_source}",
+		url = new.url
+	);
+	let favicon = match new.favicon_mode {
+		Some(AssetMode::Auto) => resolve_favicon(&new.url),
+		Some(AssetMode::Default) => Some(DEFAULT_FAVICON.to_string()),
+		Some(AssetMode::Fetch) => fetch_favicon(&new.url),
+		None => match new.favicon.as_deref() {
+			Some("") => default_favicon(&new.url),
+			Some(_) => new.favicon.clone(),
+			None => resolve_favicon(&new.url),
+		},
+	};
+	let thumbnail = match new.thumbnail_mode {
+		Some(AssetMode::Auto) => resolve_thumbnail(&new.url),
+		Some(AssetMode::Default) => Some(DEFAULT_THUMBNAIL.to_string()),
+		Some(AssetMode::Fetch) => fetch_thumbnail(&new.url),
+		None => match new.thumbnail.as_deref() {
+			Some("") => None,
+			Some(_) => new.thumbnail.clone(),
+			None => resolve_thumbnail(&new.url),
+		},
+	};
+	crate::log_debug!(
+		"resolved media for new bookmark ({url:?}): favicon={favicon:?} thumbnail={thumbnail:?}",
+		url = new.url
+	);
+	Ok(ResolvedMedia { favicon, thumbnail })
+}
+
+/// Resolves the favicon/thumbnail for a *partial update* against the
+/// bookmark's current state. A URL change recomputes both from the *new*
+/// URL so the stored icons can't point at the old site (a thumbnail from
+/// the old URL is worse than none, so it's cleared when the new URL has no
+/// thumbnail rule). Precedence, highest first:
+///   1. an explicit asset mode (`favicon_mode` / `thumbnail_mode`) —
+///      `Auto` re-derives from the post-update URL, `Default` resets to
+///      the bundled-asset token, `Fetch` re-scrapes the page now;
+///   2. an explicit value in this update request always wins;
+///   3. the empty string is the "no custom media" sentinel
+///      (`--no-custom-favicon` / `--no-thumbnail`): it *resets* favicon
+///      to the generic domain `favicon.ico` (of the current or new URL)
+///      and clears the thumbnail, regardless of URL change;
+///   4. `refresh` (--refresh) re-fetches both from the (current or new)
+///      URL, bypassing the fetched-media cache;
+///   5. an *actual* URL change recomputes both from the new URL (a resend
+///      of the identical value is not a change);
+///   6. a non-URL update keeps the stored values, still accurate.
+///
+/// `url_for_media` is the URL the stored icons must describe: the new one
+/// when this update actually changes it, otherwise the existing one.
+pub fn resolve_update(
+	existing: &Bookmark,
+	update: &UpdateBookmark,
+) -> Result<ResolvedMedia, String> {
+	reject_token_collision("favicon", update.favicon_mode, update.favicon.as_deref())?;
+	reject_token_collision(
+		"thumbnail",
+		update.thumbnail_mode,
+		update.thumbnail.as_deref(),
+	)?;
+
+	let url_changed = update.url.as_deref().is_some_and(|u| u != existing.url);
+	let url_for_media = match &update.url {
+		Some(u) if u != &existing.url => u,
+		_ => &existing.url,
+	};
+	let favicon_source = match update.favicon_mode {
+		Some(AssetMode::Auto) => "mode=auto",
+		Some(AssetMode::Default) => "mode=default",
+		Some(AssetMode::Fetch) => "mode=fetch",
+		None if update.favicon.as_deref() == Some("") => {
+			"reset-to-default sentinel (--no-custom-favicon)"
+		}
+		None if update.favicon.is_some() => "explicit payload",
+		None if update.refresh => "refreshed (--refresh)",
+		None if url_changed => "recomputed (URL changed)",
+		None => "kept stored",
+	};
+	let thumbnail_source = match update.thumbnail_mode {
+		Some(AssetMode::Auto) => "mode=auto",
+		Some(AssetMode::Default) => "mode=default",
+		Some(AssetMode::Fetch) => "mode=fetch",
+		None if update.thumbnail.as_deref() == Some("") => "clear sentinel (--no-thumbnail)",
+		None if update.thumbnail.is_some() => "explicit payload",
+		None if update.refresh => "refreshed (--refresh)",
+		None if url_changed => "recomputed (URL changed)",
+		None => "kept stored",
+	};
+	crate::log_trace!(
+		"resolving media for update of #{}: favicon {favicon_source}, thumbnail {thumbnail_source}",
+		existing.id
+	);
+	let favicon = match update.favicon_mode {
+		Some(AssetMode::Auto) => resolve_favicon(url_for_media),
+		Some(AssetMode::Default) => Some(DEFAULT_FAVICON.to_string()),
+		Some(AssetMode::Fetch) => fetch_favicon(url_for_media),
+		None => match update.favicon.as_deref() {
+			Some("") => default_favicon(url_for_media),
+			Some(_) => update.favicon.clone(),
+			None if update.refresh => fetch_favicon_fresh(url_for_media),
+			None if url_changed => resolve_favicon(url_for_media),
+			None => existing.favicon.clone(),
+		},
+	};
+	let thumbnail = match update.thumbnail_mode {
+		Some(AssetMode::Auto) => resolve_thumbnail(url_for_media),
+		Some(AssetMode::Default) => Some(DEFAULT_THUMBNAIL.to_string()),
+		Some(AssetMode::Fetch) => fetch_thumbnail(url_for_media),
+		None => match update.thumbnail.as_deref() {
+			Some("") => None,
+			Some(_) => update.thumbnail.clone(),
+			None if update.refresh => fetch_thumbnail_fresh(url_for_media),
+			None if url_changed => resolve_thumbnail(url_for_media),
+			None => existing.thumbnail.clone(),
+		},
+	};
+	crate::log_debug!(
+		"resolved media for update of #{}: favicon={favicon:?} thumbnail={thumbnail:?}",
+		existing.id
+	);
+	if favicon.as_deref() == Some(DEFAULT_FAVICON)
+		&& existing.favicon.is_some()
+		&& existing.favicon.as_deref() != Some(DEFAULT_FAVICON)
+	{
+		crate::log_warn!(
+			"update #{}: custom favicon replaced with the bundled default",
+			existing.id
+		);
+	}
+	if thumbnail.as_deref() == Some(DEFAULT_THUMBNAIL)
+		&& existing.thumbnail.is_some()
+		&& existing.thumbnail.as_deref() != Some(DEFAULT_THUMBNAIL)
+	{
+		crate::log_warn!(
+			"update #{}: custom thumbnail replaced with the bundled default",
+			existing.id
+		);
+	}
+	Ok(ResolvedMedia { favicon, thumbnail })
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Table-driven over the whole rule table: every `examples` pair must
+	// pass, so a new `ROWS` entry ships with its own proof. The `checked`
+	// counter guards against an accidentally emptied table (the harness
+	// would otherwise trivially pass with zero rules).
+	#[test]
