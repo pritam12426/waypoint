@@ -440,3 +440,226 @@ pub fn resolve_url(href: &str, base: &str) -> Option<String> {
 	}
 	// Protocol-relative: `//host/path`, inherit the base scheme.
 	if let Some(rest) = href.strip_prefix("//") {
+		let scheme = base.split_once("://").map(|(s, _)| s).unwrap_or("https");
+		return matches!(scheme, "http" | "https").then(|| format!("{scheme}://{rest}"));
+	}
+	// A colon before the first `/` (outside a leading `//`) is a
+	// non-hierarchical scheme like `data:` / `javascript:` — reject it.
+	let first_seg_end = href.find(['/', '?', '#']).unwrap_or(href.len());
+	if href[..first_seg_end].contains(':') {
+		return None;
+	}
+	// Relative: splice against the base's scheme, authority, and directory.
+	let (scheme, rest) = base.split_once("://")?;
+	if !matches!(scheme, "http" | "https") {
+		return None;
+	}
+	let (authority, base_path) = match rest.find('/') {
+		Some(idx) => (&rest[..idx], &rest[idx..]),
+		None => (rest, "/"),
+	};
+	if href.starts_with('/') {
+		Some(format!("{scheme}://{authority}{href}"))
+	} else {
+		let dir = if base_path.ends_with('/') {
+			base_path.to_string()
+		} else {
+			// The last segment decides the base directory: with a
+			// `.`-extension it's a file (resolve against its directory);
+			// without one it's treated as a directory itself (the common
+			// `https://host/root` → `/root/` convention), so relatives
+			// splice *under* it rather than silently dropping it.
+			let last_seg = base_path.rsplit('/').next().unwrap_or("");
+			if last_seg.contains('.') {
+				match base_path.rfind('/') {
+					Some(idx) => base_path[..=idx].to_string(),
+					None => "/".to_string(),
+				}
+			} else {
+				format!("{base_path}/")
+			}
+		};
+		Some(format!("{scheme}://{authority}{dir}{href}"))
+	}
+}
+
+/// Fetches the page and extracts its favicon as an absolute URL. `None` on
+/// any failure — the caller falls back to its generic domain favicon.
+///
+/// This is the generic `<link rel=icon>` scrape only. Site-specific
+/// fetchers (e.g. a YouTube channel's avatar) are dispatched by
+/// `super::media::fetch_favicon` before this runs — see
+/// `super::sites::SITE_FETCHERS`.
+pub fn fetch_favicon(url: &str) -> Option<String> {
+	crate::log_trace!("fetch_favicon: fetching {url:?}");
+	let html = match fetch_html(url) {
+		Ok(html) => html,
+		Err(e) => {
+			crate::log_warn!("fetch_favicon: {e} for {url:?}");
+			return None;
+		}
+	};
+	let href = extract_icon_href(&html)?;
+	let resolved = resolve_url(&href, url)?;
+	crate::log_trace!("fetch_favicon: {url:?} → {resolved:?}");
+	Some(resolved)
+}
+
+/// Fetches the page and extracts its `og:image` as an absolute URL. `None`
+/// on any failure — most pages simply have no social image.
+pub fn fetch_thumbnail(url: &str) -> Option<String> {
+	crate::log_trace!("fetch_thumbnail: fetching {url:?}");
+	let html = match fetch_html(url) {
+		Ok(html) => html,
+		Err(e) => {
+			crate::log_warn!("fetch_thumbnail: {e} for {url:?}");
+			return None;
+		}
+	};
+	let content = extract_og_image(&html)?;
+	let resolved = resolve_url(&content, url)?;
+	crate::log_trace!("fetch_thumbnail: {url:?} → {resolved:?}");
+	Some(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// --- pure extractors, no network -------------------------------------
+
+	#[test]
+	fn icon_plain() {
+		let html = r#"<html><head><link rel="icon" href="/favicon.ico"></head></html>"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/favicon.ico"));
+	}
+
+	// `shortcut icon` is the legacy two-token form; `href` may be quoted
+	// with single quotes and attributes may use different casing.
+	#[test]
+	fn icon_shortcut_icon_single_quoted_uppercase() {
+		let html = r#"<LINK REL='SHORTCUT ICON' HREF='/a.ico'>"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/a.ico"));
+	}
+
+	// The apple-touch-icon link wins over an earlier plain icon link.
+	#[test]
+	fn icon_prefers_apple_touch() {
+		let html = r#"<link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/apple.png">"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/apple.png"));
+	}
+
+	// Without an apple-touch link, document order decides.
+	#[test]
+	fn icon_document_order() {
+		let html = r#"<link rel="shortcut icon" href="/a.ico"><link rel="icon" href="/b.ico">"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/a.ico"));
+	}
+
+	// A `preconnect`/`stylesheet` link with no rel=icon must not match.
+	#[test]
+	fn icon_ignores_other_link_types() {
+		let html = r#"<link rel="stylesheet" href="/x.css"><link rel="icon" href="/f.ico">"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/f.ico"));
+		let css_only = r#"<link rel="preconnect" href="https://fonts.gstatic.com">"#;
+		assert_eq!(extract_icon_href(css_only), None);
+	}
+
+	// Entity decoding: `&amp;` in the URL survives as `&`.
+	#[test]
+	fn icon_entities_are_decoded() {
+		let html = r#"<link rel="icon" href="/a&amp;b.ico">"#;
+		assert_eq!(extract_icon_href(html).as_deref(), Some("/a&b.ico"));
+	}
+
+	#[test]
+	fn og_image_plain() {
+		let html = r#"<meta property="og:image" content="https://x.example/img.png">"#;
+		assert_eq!(
+			extract_og_image(html).as_deref(),
+			Some("https://x.example/img.png")
+		);
+	}
+
+	// `og:image` wins over an earlier `twitter:image`.
+	#[test]
+	fn og_image_prefers_open_graph() {
+		let html = r#"<meta name="twitter:image" content="/tw.png"><meta property="og:image" content="/og.png">"#;
+		assert_eq!(extract_og_image(html).as_deref(), Some("/og.png"));
+	}
+
+	// `og:image:url` is accepted alongside `og:image`.
+	#[test]
+	fn og_image_alt_property() {
+		let html = r#"<meta property="og:image:url" content="/og.png">"#;
+		assert_eq!(extract_og_image(html).as_deref(), Some("/og.png"));
+	}
+
+	#[test]
+	fn og_image_twitter_fallback() {
+		let html = r#"<meta name="twitter:image" content="/tw.png">"#;
+		assert_eq!(extract_og_image(html).as_deref(), Some("/tw.png"));
+		let none = r#"<meta name="description" content="no image here">"#;
+		assert_eq!(extract_og_image(none), None);
+	}
+
+	// --- URL resolution ---------------------------------------------------
+
+	#[test]
+	fn resolve_absolute_kept() {
+		assert_eq!(
+			resolve_url("https://cdn.example/i.png", "https://a.example/x").as_deref(),
+			Some("https://cdn.example/i.png")
+		);
+	}
+
+	// Non-http(s) schemes are the injection vectors — always rejected.
+	#[test]
+	fn resolve_rejects_bad_schemes() {
+		assert_eq!(
+			resolve_url("javascript:alert(1)", "https://a.example"),
+			None
+		);
+		assert_eq!(resolve_url("data:text/html,<x>", "https://a.example"), None);
+		assert_eq!(resolve_url("mailto:x@y.z", "https://a.example"), None);
+		assert_eq!(resolve_url("#fragment", "https://a.example/x"), None);
+		assert_eq!(resolve_url("", "https://a.example"), None);
+	}
+
+	#[test]
+	fn resolve_protocol_relative() {
+		assert_eq!(
+			resolve_url("//cdn.example/i.png", "https://a.example/x").as_deref(),
+			Some("https://cdn.example/i.png")
+		);
+	}
+
+	#[test]
+	fn resolve_root_relative() {
+		assert_eq!(
+			resolve_url("/img.png", "https://a.example/dir/page").as_deref(),
+			Some("https://a.example/img.png")
+		);
+	}
+
+	// A bare filename resolves against the page's *directory*, not its file.
+	#[test]
+	fn resolve_page_directory_relative() {
+		assert_eq!(
+			resolve_url("img.png", "https://a.example/dir/page.html").as_deref(),
+			Some("https://a.example/dir/img.png")
+		);
+	}
+
+	// A relative path without a trailing path (bare host) keeps the root.
+	#[test]
+	fn resolve_bare_host_base() {
+		assert_eq!(
+			resolve_url("img.png", "https://a.example").as_deref(),
+			Some("https://a.example/img.png")
+		);
+	}
+
+	// A colon inside a *later* path segment is fine — only the first
+	// segment decides whether this is a scheme.
+	#[test]
