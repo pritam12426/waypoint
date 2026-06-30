@@ -297,3 +297,146 @@ pub(crate) fn fetch_html_limited(
 /// One network attempt. `Transient` covers timeouts, DNS/connect failures,
 /// and 429/5xx responses (the flaky-network and overloaded-server cases a
 /// retry can beat); everything else is `Final`.
+fn attempt_once(url: &str, limit: u64, user_agent: Option<&str>) -> Attempt {
+	let mut request = agent().get(url);
+	if let Some(ua) = user_agent {
+		request = request.header("User-Agent", ua);
+	}
+	let mut res = match request.call() {
+		Ok(res) => res,
+		Err(e) => {
+			let reason = describe_ureq_error(&e);
+			if is_transient(&e) {
+				return Attempt::Transient {
+					reason,
+					conn_failure: is_conn_failure(&e),
+				};
+			}
+			return Attempt::Final(reason);
+		}
+	};
+	match res.body_mut().with_config().limit(limit).read_to_string() {
+		Ok(body) => Attempt::Ok(body),
+		Err(e) => {
+			// A body that cannot be read back is a genuine anomaly rather
+			// than an expected page-level failure — the log level says so.
+			crate::log_error!("fetch_html: could not read response body of {url:?}: {e}");
+			Attempt::Transient {
+				reason: e.to_string(),
+				conn_failure: false,
+			}
+		}
+	}
+}
+
+/// Short human-readable reason for an `ureq` failure, for `log_warn!` lines.
+fn describe_ureq_error(e: &ureq::Error) -> String {
+	match e {
+		ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+		ureq::Error::Timeout(_) => "timed out".to_string(),
+		other => other.to_string(),
+	}
+}
+
+/// Parses the attributes of a tag into a lowercase-name → value map. Values
+/// are HTML-entity-decoded (`&amp;` → `&`) since attribute text is
+/// character-escaped on the wire. Order is not preserved — attribute order
+/// is not meaningful for the tags we care about.
+fn attr_map(tag: &str) -> std::collections::HashMap<String, String> {
+	let mut map = std::collections::HashMap::new();
+	for cap in ATTR_RE.captures_iter(tag) {
+		let name = cap[1].to_ascii_lowercase();
+		let value = cap
+			.get(2)
+			.or_else(|| cap.get(3))
+			.or_else(|| cap.get(4))
+			.map(|m| super::import_export::html_unescape(m.as_str().trim()))
+			.unwrap_or_default();
+		map.insert(name, value);
+	}
+	map
+}
+
+/// Returns `true` when a whitespace-separated `rel` value marks a favicon:
+/// `icon`, `shortcut icon`, `apple-touch-icon`, `apple-touch-icon-precomposed`.
+fn is_icon_rel(rel: &str) -> bool {
+	rel.split_whitespace()
+		.any(|t| t == "icon" || t.contains("icon"))
+}
+
+/// Finds the page's favicon URL from a `<link rel=...icon... href=...>` tag.
+///
+/// Priority: the first `apple-touch-icon` link (highest resolution) wins
+/// outright; otherwise the first plain icon link in document order. Returns
+/// the *raw* href — resolve it against the page URL with `resolve_url`.
+pub fn extract_icon_href(html: &str) -> Option<String> {
+	let mut first_plain: Option<String> = None;
+	for m in LINK_TAG_RE.find_iter(html) {
+		let attrs = attr_map(m.as_str());
+		let Some(rel) = attrs.get("rel") else {
+			continue;
+		};
+		// `rel` values are case-insensitive (`SHORTCUT ICON` happens), so
+		// normalize before any token check.
+		let rel = rel.to_ascii_lowercase();
+		if !is_icon_rel(&rel) {
+			continue;
+		}
+		let Some(href) = attrs.get("href").filter(|h| !h.is_empty()) else {
+			continue;
+		};
+		if rel.split_whitespace().any(|t| t.starts_with("apple-touch")) {
+			return Some(href.clone());
+		}
+		if first_plain.is_none() {
+			first_plain = Some(href.clone());
+		}
+	}
+	first_plain
+}
+
+/// Finds the page's social image: the first `og:image` (or `og:image:url`)
+/// `<meta>` tag, falling back to `twitter:image`. Returns the raw `content`
+/// value — resolve it against the page URL with `resolve_url`.
+pub fn extract_og_image(html: &str) -> Option<String> {
+	let mut twitter: Option<String> = None;
+	for m in META_TAG_RE.find_iter(html) {
+		let attrs = attr_map(m.as_str());
+		let Some(prop) = attrs
+			.get("property")
+			.or_else(|| attrs.get("name"))
+			.map(|p| p.to_ascii_lowercase())
+		else {
+			continue;
+		};
+		let Some(content) = attrs.get("content").filter(|c| !c.is_empty()) else {
+			continue;
+		};
+		match prop.as_str() {
+			"og:image" | "og:image:url" => return Some(content.clone()),
+			"twitter:image" if twitter.is_none() => twitter = Some(content.clone()),
+			_ => {}
+		}
+	}
+	twitter
+}
+
+/// Resolves a possibly-relative href from a page against that page's URL,
+/// returning an absolute http(s) URL to store.
+///
+/// Accepts absolute URLs (http/https only), protocol-relative `//host/...`,
+/// root-relative `/path`, and page-directory-relative `path`. Rejects any
+/// non-http(s) scheme — `data:`, `javascript:`, `mailto:`, fragment-only
+/// refs, and empty values all come back `None`. Hand-rolled (no `url`
+/// crate dependency), matching how the rest of the codebase treats URLs.
+pub fn resolve_url(href: &str, base: &str) -> Option<String> {
+	let href = href.trim();
+	if href.is_empty() || href.starts_with('#') {
+		return None;
+	}
+	// Absolute URL — only http/https survive.
+	if let Some((scheme, _)) = href.split_once("://") {
+		return matches!(scheme, "http" | "https").then(|| href.to_string());
+	}
+	// Protocol-relative: `//host/path`, inherit the base scheme.
+	if let Some(rest) = href.strip_prefix("//") {
