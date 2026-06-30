@@ -663,3 +663,61 @@ mod tests {
 	// A colon inside a *later* path segment is fine — only the first
 	// segment decides whether this is a scheme.
 	#[test]
+	fn resolve_colon_in_path_is_fine() {
+		assert_eq!(
+			resolve_url("dir/x:y.png", "https://a.example/root").as_deref(),
+			Some("https://a.example/root/dir/x:y.png")
+		);
+	}
+
+	// --- host extraction for the circuit breaker -------------------------
+
+	#[test]
+	fn host_of_strips_scheme_path_and_case() {
+		assert_eq!(host_of("https://Example.COM/a/b?c=1"), "example.com");
+		assert_eq!(host_of("http://[2001:db8::1]:8080/x"), "2001:db8::1");
+		assert_eq!(host_of("https://localhost"), "localhost");
+		assert_eq!(host_of("garbage"), "");
+	}
+
+	#[test]
+	fn transient_classification() {
+		use ureq::Error as U;
+		let timeout = U::Timeout(ureq::Timeout::Global);
+		assert!(is_transient(&timeout));
+		assert!(is_transient(&U::Io(std::io::Error::new(
+			std::io::ErrorKind::ConnectionRefused,
+			"refused"
+		))));
+		assert!(is_transient(&U::StatusCode(429)));
+		assert!(is_transient(&U::StatusCode(503)));
+		assert!(!is_transient(&U::StatusCode(404)));
+		assert!(!is_transient(&U::BadUri("nope".into())));
+
+		assert!(is_conn_failure(&timeout));
+		assert!(is_conn_failure(&U::Io(std::io::Error::new(
+			std::io::ErrorKind::ConnectionReset,
+			"reset"
+		))));
+		// A retryable *status* is transient but never trips the breaker.
+		assert!(!is_conn_failure(&U::StatusCode(503)));
+		assert!(!is_conn_failure(&U::StatusCode(429)));
+	}
+
+	// --- circuit breaker ------------------------------------------------
+
+	#[test]
+	fn breaker_trips_after_threshold_and_recovers() {
+		let breaker = CircuitBreaker::default();
+		assert!(breaker.blocked_for("dead.example").is_none());
+		for _ in 0..BREAKER_THRESHOLD {
+			breaker.record("dead.example", false);
+		}
+		assert!(breaker.blocked_for("dead.example").is_some());
+		// A success clears the streak and re-opens the breaker.
+		breaker.record("dead.example", true);
+		assert!(breaker.blocked_for("dead.example").is_none());
+		// And an unrelated host is never affected.
+		assert!(breaker.blocked_for("alive.example").is_none());
+	}
+}
