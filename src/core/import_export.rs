@@ -133,3 +133,168 @@ pub fn export_csv(conn: &Connection) -> Result<String> {
 
 /// Quotes a CSV field when it contains a comma, quote, or newline, doubling
 /// any embedded quotes (RFC 4180).
+fn csv_field(s: &str) -> String {
+	if s.chars().any(|c| matches!(c, ',' | '"' | '\n' | '\r')) {
+		format!("\"{}\"", s.replace('"', "\"\""))
+	} else {
+		s.to_string()
+	}
+}
+
+// ============================================================
+// Import
+// ============================================================
+
+/// Imports a Netscape bookmark file's contents (the format every major
+/// browser exports to). `<H3>` folder headings become categories; each `<A
+/// HREF="...">Title</A>` becomes a bookmark tagged with the folder it
+/// appeared under.
+///
+/// This is a regex-based scan rather than a full HTML parser: browser
+/// bookmark exports are a small, consistent subset of HTML, and a real
+/// parser is more machinery than that format needs.
+///
+/// Import semantics:
+/// * folders (`<H3>`) update the *current* category for the links that
+///   follow (nesting isn't tracked — browsers flatten exports anyway);
+/// * links without an `HREF`, or with an empty URL, are skipped silently;
+/// * a blank title falls back to the URL;
+/// * duplicates (URL already in the database) are skipped with a warning
+///   rather than an error, so a second import of the same file is a no-op.
+///
+/// The optional parameters override the per-file structure:
+/// * `category` — when given, every imported bookmark is placed in that
+///   category (created if missing) and the `<H3>` folder headings are
+///   ignored for categorization. When `None`, folders still map to
+///   categories and links outside any folder fall back to the default
+///   category (`DEFAULT_CATEGORY`).
+/// * `tags` — when given, these tags are added to every imported bookmark
+///   (the file itself carries no tags).
+/// * `archive` — when `true`, imported bookmarks are created directly in
+///   the archive (the FTS `bookmarks_fts_archived` index) instead of the
+///   active list.
+pub fn import_html(
+	conn: &Connection,
+	content: &str,
+	tags: Option<Vec<String>>,
+	category: Option<String>,
+	archive: bool,
+) -> Result<ImportResult> {
+	crate::log_debug!("import: parsing {} bytes of netscape html", content.len());
+
+	// A category override overrides every `<H3>` folder; a blank value
+	// counts as "not given" and keeps the folder-derived behavior.
+	let category_override = category
+		.map(|c| c.trim().to_string())
+		.filter(|c| !c.is_empty());
+
+	// One combined regex: an `<H3>...</H3>` capture (folder heading) OR an
+	// `<A ...attributes...>Title</A>` capture. `(?is)` = dot-all +
+	// case-insensitive, so attributes can span lines and tag names can be
+	// any case (some exporters emit `href`, some `HREF`).
+	let entry_re = regex::Regex::new(
+		r#"(?is)<H3[^>]*>(?P<folder>.*?)</H3>|<A\s+(?P<attrs>[^>]*)>(?P<title>.*?)</A>"#,
+	)?;
+	// Pull the URL out of the attributes blob.
+	let href_re = regex::Regex::new(r#"(?is)HREF\s*=\s*"([^"]*)""#)?;
+
+	// Links outside any `<H3>` folder fall back to the default category.
+	let mut current_category = DEFAULT_CATEGORY.to_string();
+	let mut imported = 0;
+	let mut skipped = 0;
+
+	for cap in entry_re.captures_iter(content) {
+		// Folder heading → switch the current category (unless a `category`
+		// override pins every imported bookmark to one category).
+		if let Some(folder) = cap.name("folder") {
+			let name = html_unescape(folder.as_str().trim());
+			if category_override.is_none() && !name.is_empty() {
+				current_category = name;
+			}
+			continue;
+		}
+
+		// Otherwise an `<A>` entry: need both its attributes and title.
+		let (Some(attrs), Some(title)) = (cap.name("attrs"), cap.name("title")) else {
+			continue;
+		};
+		let Some(href_cap) = href_re.captures(attrs.as_str()) else {
+			continue;
+		};
+		let url = html_unescape(&href_cap[1]);
+		if url.is_empty() {
+			continue;
+		}
+		let title = html_unescape(title.as_str().trim());
+
+		let new = NewBookmark {
+			title: Some(if title.is_empty() { url.clone() } else { title }),
+			url: url.clone(),
+			description: None,
+			category: Some(
+				category_override
+					.clone()
+					.unwrap_or_else(|| current_category.clone()),
+			),
+			tags: tags.clone(),
+			keyword: None,
+			note: None,
+			favicon: None,
+			thumbnail: None,
+			favicon_mode: None,
+			thumbnail_mode: None,
+			starred: Some(false),
+			is_archived: Some(archive),
+		};
+
+		match bookmarks::insert(conn, &new) {
+			Ok(_) => imported += 1,
+			Err(e) => {
+				crate::log_warn!("skipped {url}: {e}");
+				skipped += 1;
+			}
+		}
+	}
+
+	crate::log_info!("imported {imported} bookmarks ({skipped} skipped) (netscape)");
+	Ok(ImportResult { imported, skipped })
+}
+
+/// Decodes the small set of HTML entities browsers actually emit in
+/// bookmark exports. Order matters: `&amp;` must be last so it isn't
+/// double-decoded (e.g. `&amp;lt;` → `&lt;`, not `<`).
+///
+/// `pub(crate)` because `core::fetch` needs the exact same decoding for
+/// URLs scraped out of `link`/`meta` attributes.
+pub(crate) fn html_unescape(s: &str) -> String {
+	s.replace("&lt;", "<")
+		.replace("&gt;", ">")
+		.replace("&quot;", "\"")
+		.replace("&#39;", "'")
+		.replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::database;
+	use crate::model::BookmarkFilter;
+
+	/// A minimal Netscape export: one link outside any folder (before the
+	/// first `<H3>` heading), then an `<H3>` folder with a link inside it.
+	const NETSCAPE: &str = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+<DT><A HREF="https://standalone.example/page">Standalone</A>
+<DT><H3>Work</H3>
+<DL><p>
+<DT><A HREF="https://work.example/proj">Project</A>
+</DL><p>
+</DL><p>"#;
+
+	fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let path = dir.path().join("waypointd_test.sqlite");
+		(dir, path)
+	}
+
+	#[test]
