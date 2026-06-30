@@ -298,3 +298,115 @@ mod tests {
 	}
 
 	#[test]
+	fn import_maps_folders_and_defaults_links_outside_them() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+
+		let result = import_html(&conn, NETSCAPE, None, None, false).unwrap();
+		assert_eq!(result.imported, 2);
+		assert_eq!(result.skipped, 0);
+
+		let all = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(false),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(all.len(), 2, "both links imported");
+
+		let project = all
+			.iter()
+			.find(|b| b.url == "https://work.example/proj")
+			.unwrap();
+		assert_eq!(project.category_name.as_deref(), Some("Work"));
+		assert!(project.tags.is_empty(), "no tag passed means no tags");
+		assert!(!project.is_archived);
+
+		let standalone = all
+			.iter()
+			.find(|b| b.url == "https://standalone.example/page")
+			.unwrap();
+		assert_eq!(
+			standalone.category_name.as_deref(),
+			Some(DEFAULT_CATEGORY),
+			"links outside any folder fall back to the default category"
+		);
+	}
+
+	#[test]
+	fn import_applies_tags_category_and_archive_flags() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+
+		let result = import_html(
+			&conn,
+			NETSCAPE,
+			Some(vec!["rust".to_string(), "todo".to_string()]),
+			Some("Read Later".to_string()),
+			true,
+		)
+		.unwrap();
+		assert_eq!(result.imported, 2);
+
+		// Every imported bookmark is archived, so the active list is empty.
+		let active = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(false),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert!(
+			active.is_empty(),
+			"all imports went straight to the archive"
+		);
+
+		let archived = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(true),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(archived.len(), 2);
+		for b in &archived {
+			assert_eq!(
+				b.category_name.as_deref(),
+				Some("Read Later"),
+				"category override overrides the folder-derived category"
+			);
+			assert_eq!(b.tags, vec!["rust".to_string(), "todo".to_string()]);
+			assert!(b.is_archived);
+		}
+	}
+
+	#[test]
+	fn import_skips_duplicates() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+
+		import_html(&conn, NETSCAPE, None, None, false).unwrap();
+		let result = import_html(&conn, NETSCAPE, None, None, false).unwrap();
+		assert_eq!(result.imported, 0);
+		assert_eq!(result.skipped, 2, "second import is a no-op");
+	}
+
+	#[test]
+	fn export_round_trips_active_bookmarks() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+		import_html(&conn, NETSCAPE, None, None, false).unwrap();
+
+		let md = export_markdown(&conn).unwrap();
+		assert!(md.starts_with("# Bookmarks\n"));
+		assert!(md.contains("https://work.example/proj"));
+
+		let csv = export_csv(&conn).unwrap();
+		assert!(csv.starts_with("id,title,url,description,"));
+		assert!(csv.contains("https://standalone.example/page"));
+	}
+}
