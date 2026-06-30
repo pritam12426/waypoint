@@ -102,3 +102,198 @@ fn is_transient(err: &ureq::Error) -> bool {
 /// True when the failure means the host itself is unreachable (as opposed
 /// to a response we didn't like). Only these trip the circuit breaker —
 /// a 404 or a blocked-IP refusal is the *page's* fault, not the host's.
+fn is_conn_failure(err: &ureq::Error) -> bool {
+	matches!(
+		err,
+		ureq::Error::Timeout(_)
+			| ureq::Error::Io(_)
+			| ureq::Error::HostNotFound
+			| ureq::Error::ConnectionFailed
+			| ureq::Error::Protocol(_)
+			| ureq::Error::Tls(_)
+			| ureq::Error::ConnectProxyFailed(_)
+	)
+}
+
+/// Per-host circuit breaker. Keyed by lowercase host; tracks consecutive
+/// connection-level failures and refuses new fetches for `BREAKER_COOLDOWN`
+/// after the threshold is crossed. Shared process-wide so a save and a link
+/// check (both of which fetch the same host) cooperate instead of each
+/// hammering the dead host independently.
+#[derive(Default)]
+struct CircuitBreaker {
+	inner: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl CircuitBreaker {
+	/// `None` means "fetch allowed"; `Some(remaining)` means the breaker is
+	/// open for this host and the caller should not even try.
+	fn blocked_for(&self, host: &str) -> Option<Duration> {
+		let inner = self.inner.lock().unwrap();
+		inner.get(host).and_then(|(_, until)| {
+			let remaining = until.saturating_duration_since(Instant::now());
+			(remaining > Duration::ZERO).then_some(remaining)
+		})
+	}
+
+	fn record(&self, host: &str, conn_ok: bool) {
+		let mut inner = self.inner.lock().unwrap();
+		let entry = inner.entry(host.to_owned()).or_insert((0, Instant::now()));
+		if conn_ok {
+			// Any successful connection clears the streak — the host is
+			// alive again, however flaky the page itself turned out to be.
+			*entry = (0, Instant::now());
+		} else {
+			entry.0 += 1;
+			if entry.0 >= BREAKER_THRESHOLD {
+				entry.1 = Instant::now() + BREAKER_COOLDOWN;
+				crate::log_warn!(
+					"circuit breaker: host {host:?} blocked for {}s after {} consecutive connection failures",
+					BREAKER_COOLDOWN.as_secs(),
+					entry.0
+				);
+			}
+		}
+	}
+}
+
+static BREAKER: LazyLock<CircuitBreaker> = LazyLock::new(CircuitBreaker::default);
+
+/// A `<link ...>` tag, attributes included (dot-all so `>` inside a quoted
+/// value doesn't end the match).
+static LINK_TAG_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?is)<link\b[^>]*>").expect("static LINK_TAG_RE is valid")
+});
+
+/// A `<meta ...>` tag.
+static META_TAG_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r"(?is)<meta\b[^>]*>").expect("static META_TAG_RE is valid")
+});
+
+/// One HTML attribute: `name="value"`, `name='value'`, or bare `name=value`,
+/// name and value captured separately. Case-insensitive (`HREF=` happens).
+static ATTR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(r#"(?i)([a-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#)
+		.expect("static ATTR_RE is valid")
+});
+
+/// Builds the shared ureq agent. One agent for all fetches — cheap and
+/// thread-safe. `max_redirects` caps the redirect chain, the three timeouts
+/// pin the overall budget, and `SsrfResolver` refuses private/loopback
+/// destinations on every hop (http/https-only is enforced separately in
+/// `fetch_html_limited`).
+fn agent() -> &'static Agent {
+	static AGENT: LazyLock<Agent> = LazyLock::new(|| {
+		let config = Config::builder()
+			.timeout_global(Some(TIMEOUT))
+			.timeout_connect(Some(TIMEOUT))
+			.timeout_resolve(Some(TIMEOUT))
+			.max_redirects(MAX_REDIRECTS)
+			.build();
+		Agent::with_parts(config, DefaultConnector::default(), SsrfResolver::default())
+	});
+	&AGENT
+}
+
+/// Fetches `url` and returns its raw text. Every network problem — wrong
+/// scheme, DNS, connect, timeout, HTTP error status, or an oversized body —
+/// is an `Err` with a short reason suitable for a `log_warn!`.
+fn fetch_html(url: &str) -> Result<String, String> {
+	fetch_html_limited(url, MAX_BODY_BYTES, None)
+}
+
+/// The authority (host, brackets trimmed, lowercased) of a URL — the circuit
+/// breaker's key. Empty for unparseable URLs; the breaker treats those as
+/// their own key so a malformed URL can't dodge the guard.
+fn host_of(url: &str) -> String {
+	url.split_once("://")
+		.map(|(_, rest)| {
+			let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+			let host = if let Some(stripped) = authority.strip_prefix('[') {
+				// Bracket IPv6 literal — the host is up to the closing `]`
+				// (anything after it is `]:port`).
+				stripped.split(']').next().unwrap_or("")
+			} else {
+				// Bare host (optionally `host:port`).
+				authority.split(':').next().unwrap_or("")
+			};
+			host.to_ascii_lowercase()
+		})
+		.unwrap_or_default()
+}
+
+/// Outcome of one fetch attempt: succeeded, failed transiently (retry has a
+/// chance), or failed definitively (never retried — a 404 is a 404).
+/// `conn_failure` marks the transient kind that also trips the circuit
+/// breaker (the host is unreachable) as opposed to a retryable HTTP status
+/// (the host answered but is overloaded).
+enum Attempt {
+	Ok(String),
+	Transient { reason: String, conn_failure: bool },
+	Final(String),
+}
+
+/// The shared fetch path: same guarantees as `fetch_html`, but with an
+/// explicit body budget and an optional `User-Agent` override. Site
+/// fetchers use it when they need a bigger budget than the default 512 KB
+/// or a browser UA to get the page a real visitor would.
+pub(crate) fn fetch_html_limited(
+	url: &str,
+	limit: u64,
+	user_agent: Option<&str>,
+) -> Result<String, String> {
+	// The scheme is case-insensitive per RFC 3986 (`HTTP://` is legal), so
+	// normalize before the allow-list check.
+	let scheme = match url.split_once("://") {
+		Some((scheme, _)) => scheme.to_ascii_lowercase(),
+		None => return Err("not an absolute URL".to_string()),
+	};
+	if !matches!(scheme.as_str(), "http" | "https") {
+		return Err(format!("unsupported scheme \"{scheme}\""));
+	}
+
+	let host = host_of(url);
+	// The breaker short-circuits before the first attempt: a host that just
+	// burned through its failure budget is not going to magically heal in
+	// the 150ms a retry would wait, and every blocked save is a bookmark
+	// write we can unblock.
+	if let Some(remaining) = BREAKER.blocked_for(&host) {
+		return Err(format!(
+			"host {host:?} temporarily unreachable (breaker open, {remaining:?} left)"
+		));
+	}
+
+	let mut last_err = String::new();
+	for attempt in 0..RETRY_ATTEMPTS {
+		if attempt > 0 {
+			std::thread::sleep(RETRY_BACKOFF);
+		}
+		match attempt_once(url, limit, user_agent) {
+			Attempt::Ok(body) => {
+				// Any HTTP response means the host answered — reset the
+				// breaker even when the body later fails to parse (that is
+				// a page problem, not a host problem).
+				BREAKER.record(&host, true);
+				return Ok(body);
+			}
+			Attempt::Final(reason) => {
+				BREAKER.record(&host, true);
+				return Err(reason);
+			}
+			Attempt::Transient {
+				reason,
+				conn_failure,
+			} => {
+				last_err = reason;
+				// Only connection-level failures count against the breaker;
+				// a 429/5xx means the host answered and stays un-tripped.
+				BREAKER.record(&host, !conn_failure);
+			}
+		}
+	}
+	Err(last_err)
+}
+
+/// One network attempt. `Transient` covers timeouts, DNS/connect failures,
+/// and 429/5xx responses (the flaky-network and overloaded-server cases a
+/// retry can beat); everything else is `Final`.
