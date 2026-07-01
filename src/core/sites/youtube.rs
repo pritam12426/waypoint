@@ -286,3 +286,228 @@ pub fn video_channel_avatar(url: &str) -> Option<String> {
 /// so here we only care about the query string: split off everything after
 /// the first `?`, walk the `&`-separated pairs, and take the first `v=...`.
 /// A missing `v` (or an empty one) returns `None` → no thumbnail.
+fn watch_thumbnail(url: &str) -> Option<String> {
+	let query = url.split('?').nth(1)?;
+	for pair in query.split('&') {
+		let (key, value) = pair.split_once('=')?;
+		if key == "v" && !value.is_empty() {
+			let thumb = format!("https://i.ytimg.com/vi/{value}/hqdefault.jpg");
+			crate::log_trace!("youtube /watch rule: video id {value:?} from {url:?} → {thumb}");
+			return Some(thumb);
+		}
+	}
+	crate::log_trace!("youtube /watch rule: no v= param in {url:?}; no thumbnail");
+	None
+}
+
+/// Extracts a video id from a `/shorts/{id}` URL (the first path segment
+/// after the `/shorts/` marker).
+///
+/// Strips any query/fragment first, then takes the token following the
+/// `/shorts/` literal. The `split('/').next()` caps the id at one path
+/// segment, so `/shorts/abc/extra` still yields `abc`.
+fn shorts_thumbnail(url: &str) -> Option<String> {
+	let path = url.split(['?', '#']).next().unwrap_or(url);
+	let id = path
+		.split_once("/shorts/")?
+		.1
+		.split('/')
+		.next()
+		.unwrap_or("");
+	if id.is_empty() {
+		crate::log_trace!("youtube /shorts rule: empty id in {url:?}; no thumbnail");
+		return None;
+	}
+	let thumb = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
+	crate::log_trace!("youtube /shorts rule: video id {id:?} from {url:?} → {thumb}");
+	Some(thumb)
+}
+
+/// Resolves a video URL's CDN thumbnail (`i.ytimg.com/vi/{id}/hqdefault.jpg`)
+/// — deterministic, no network. Dispatches on path: `/shorts/` → the shorts
+/// rule, otherwise `/watch` (which needs the `v` query param).
+///
+/// The offline rule table already produces the same URL for `Auto` mode;
+/// this is registered in `super::SITE_FETCHERS` under the `Thumbnail`
+/// target so the *cache-first* pipeline (`fetch_thumbnail`) serves it from
+/// the media cache instead of scraping the page.
+pub fn video_thumbnail(url: &str) -> Option<String> {
+	if path_of_url(url).starts_with("/shorts/") {
+		shorts_thumbnail(url)
+	} else {
+		watch_thumbnail(url)
+	}
+}
+
+/// Channel pages have no extractable thumbnail; returning `None` sends the
+/// favicon resolution on to the generic domain fallback.
+///
+/// The channel *avatar* (fetch mode) is handled by `channel_avatar` above;
+/// the offline `Auto` mode keeps the generic `youtube.com/favicon.ico`
+/// since deriving the avatar needs a live page fetch.
+fn channel_icon(url: &str) -> Option<String> {
+	crate::log_trace!(
+		"youtube channel rule matched {url:?}; offline mode falls back to the domain favicon (avatar needs a live fetch)"
+	);
+	None
+}
+
+/// YouTube rules:
+///
+/// * `/watch?v=...`      → video thumbnail
+/// * `/shorts/{id}`      → video thumbnail
+/// * `/@channel`         → favicon (offline: falls through to youtube.com/favicon.ico)
+///
+/// Note the two thumbnail rules share `host_suffix: "youtube.com"` — they
+/// differ only by `path_prefix`, and the engine picks the *first* matching
+/// rule for the `Thumbnail` target, so `/watch` before `/shorts/` ordering
+/// here is cosmetic (their paths can never both match).
+pub static ROWS: &[SiteRule] = &[
+	SiteRule {
+		host_suffix: "youtube.com",
+		path_prefix: Some("/watch"),
+		target: MediaTarget::Thumbnail,
+		extract: watch_thumbnail,
+		examples: &[
+			(
+				"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+				Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"),
+			),
+			(
+				"https://youtube.com/watch?t=30&v=AbCdEf123",
+				Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg"),
+			),
+		],
+	},
+	SiteRule {
+		host_suffix: "youtube.com",
+		path_prefix: Some("/shorts/"),
+		target: MediaTarget::Thumbnail,
+		extract: shorts_thumbnail,
+		examples: &[(
+			"https://www.youtube.com/shorts/AbCdEf123",
+			Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg"),
+		)],
+	},
+	SiteRule {
+		host_suffix: "youtube.com",
+		path_prefix: Some("/@"),
+		target: MediaTarget::Favicon,
+		extract: channel_icon,
+		examples: &[("https://www.youtube.com/@SomeChannel", None)],
+	},
+];
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// --- URL matching ----------------------------------------------------
+
+	#[test]
+	fn channel_url_shapes() {
+		assert!(is_channel_url("https://www.youtube.com/@SomeChannel"));
+		assert!(is_channel_url("https://youtube.com/@a"));
+		assert!(is_channel_url("https://m.youtube.com/@a/videos"));
+		assert!(!is_channel_url("https://www.youtube.com/watch?v=x"));
+		assert!(!is_channel_url("https://www.youtube.com/shorts/x"));
+		assert!(!is_channel_url("https://www.youtube.com/channel/UC123"));
+		assert!(!is_channel_url("https://youtube.com.evil.example/@a"));
+	}
+
+	// --- ytInitialData extraction (no network) ---------------------------
+
+	#[test]
+	fn yt_avatar_plain() {
+		let html = r#"<html><head><script>var ytInitialData = {"header":{"pageHeaderRenderer":{"content":{"pageHeaderViewModel":{"image":{"decoratedAvatarViewModel":{"avatar":{"avatarViewModel":{"image":{"sources":[{"url":"https://yt3.googleusercontent.com/small","width":48,"height":48},{"url":"https://yt3.googleusercontent.com/large","width":900,"height":900}]}}}}}}}}}};</script></head></html>"#;
+		assert_eq!(
+			extract_yt_avatar(html).as_deref(),
+			Some("https://yt3.googleusercontent.com/large")
+		);
+	}
+
+	// `sources` is ordered smallest-to-largest; the highest-resolution
+	// avatar is the last entry. The page is built with `serde_json`'s
+	// pretty-printer so whitespace-heavy (real-world) pages are exercised.
+	#[test]
+	fn yt_avatar_whitespace_and_ordering() {
+		let data = serde_json::json!({
+			"header": {
+				"pageHeaderRenderer": {
+					"content": {
+						"pageHeaderViewModel": {
+							"image": {
+								"decoratedAvatarViewModel": {
+									"avatar": {
+										"avatarViewModel": {
+											"image": {
+												"sources": [
+													{ "url": "https://yt3.googleusercontent.com/small" },
+													{ "url": "https://yt3.googleusercontent.com/medium" },
+													{ "url": "https://yt3.googleusercontent.com/large" }
+												]
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		});
+		let html = format!(
+			"<script>var ytInitialData = {};</script>",
+			serde_json::to_string_pretty(&data).unwrap()
+		);
+		assert_eq!(
+			extract_yt_avatar(&html).as_deref(),
+			Some("https://yt3.googleusercontent.com/large")
+		);
+	}
+
+	// No `ytInitialData` script on the page → no avatar.
+	#[test]
+	fn yt_avatar_missing_script() {
+		assert_eq!(
+			extract_yt_avatar("<html>no ytInitialData here</html>"),
+			None
+		);
+	}
+
+	// A captured blob that is not valid JSON degrades to `None`, never a
+	// panic.
+	#[test]
+	fn yt_avatar_bad_json() {
+		let html = r#"<script>var ytInitialData = {not valid json} ;</script>"#;
+		assert_eq!(extract_yt_avatar(html), None);
+	}
+
+	// The blob parses but the deep avatar path is missing → `None`.
+	#[test]
+	fn yt_avatar_missing_path() {
+		let html = r#"<script>var ytInitialData = {"header":{"other":1}};</script>"#;
+		assert_eq!(extract_yt_avatar(html), None);
+	}
+
+	// An empty `sources` array has nothing to take.
+	#[test]
+	fn yt_avatar_empty_sources() {
+		let html = r#"<script>var ytInitialData = {"header":{"pageHeaderRenderer":{"content":{"pageHeaderViewModel":{"image":{"decoratedAvatarViewModel":{"avatar":{"avatarViewModel":{"image":{"sources":[]}}}}}}}}}};</script>"#;
+		assert_eq!(extract_yt_avatar(html), None);
+	}
+
+	// --- video URL predicates -------------------------------------------
+
+	#[test]
+	fn video_url_shapes() {
+		assert!(is_video_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+		assert!(is_video_url("https://youtube.com/watch?t=30&v=AbCdEf123"));
+		assert!(is_video_url("https://m.youtube.com/shorts/AbCdEf123"));
+		assert!(!is_video_url("https://www.youtube.com/@SomeChannel"));
+		assert!(!is_video_url("https://www.youtube.com/"));
+		assert!(!is_video_url("https://www.youtube.com/channel/UC123"));
+		assert!(!is_video_url("https://youtube.com.evil.example/watch?v=x"));
+	}
+
+	#[test]
