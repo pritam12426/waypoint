@@ -511,3 +511,70 @@ mod tests {
 	}
 
 	#[test]
+	fn youtube_url_shapes() {
+		assert!(is_youtube_url("https://www.youtube.com/@SomeChannel"));
+		assert!(is_youtube_url("https://youtube.com/watch?v=x"));
+		assert!(is_youtube_url("https://m.youtube.com/shorts/x"));
+		assert!(!is_youtube_url("https://example.com/watch?v=x"));
+		assert!(!is_youtube_url("youtube.com.evil.example/@a"));
+		assert!(!is_youtube_url("ftp://youtube.com/@a"));
+	}
+
+	// --- video thumbnail (deterministic, no network) ---------------------
+
+	#[test]
+	fn video_thumbnail_urls() {
+		assert_eq!(
+			video_thumbnail("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(),
+			Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+		);
+		assert_eq!(
+			video_thumbnail("https://www.youtube.com/watch?t=30&v=AbCdEf123").as_deref(),
+			Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg")
+		);
+		assert_eq!(
+			video_thumbnail("https://www.youtube.com/shorts/AbCdEf123").as_deref(),
+			Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg")
+		);
+		// A `/watch` URL without a `v` param has no thumbnail.
+		assert_eq!(video_thumbnail("https://www.youtube.com/watch"), None);
+	}
+
+	// --- ytInitialData owner-avatar extraction (no network) --------------
+
+	#[test]
+	fn yt_video_owner_avatar_plain() {
+		let html = r#"<html><body><script>var ytInitialData = {"contents":{"twoColumnWatchNextResults":{"results":{"results":{"contents":[{"videoSecondaryInfoRenderer":{"owner":{"videoOwnerRenderer":{"thumbnail":{"thumbnails":[{"url":"https://yt3.googleusercontent.com/small","width":48,"height":48},{"url":"https://yt3.googleusercontent.com/large","width":900,"height":900}]}}}}}]}}}}};</script></body></html>"#;
+		// `thumbnails` is ordered smallest-to-largest; the last entry wins.
+		assert_eq!(
+			extract_yt_video_owner_avatar(html).as_deref(),
+			Some("https://yt3.googleusercontent.com/large")
+		);
+	}
+
+	// A `contents` row without `videoSecondaryInfoRenderer` (a related
+	// video, an ad, ...) must be skipped, not treated as the answer — the
+	// owner row comes later.
+	#[test]
+	fn yt_video_owner_avatar_skips_non_owner_rows() {
+		let html = r#"<script>var ytInitialData = {"contents":{"twoColumnWatchNextResults":{"results":{"results":{"contents":[{"videoPrimaryInfoRenderer":{"title":{"runs":[{"text":"a"}]}}},{"videoSecondaryInfoRenderer":{"owner":{"videoOwnerRenderer":{"thumbnail":{"thumbnails":[{"url":"https://yt3.googleusercontent.com/owner-avatar"}]}}}}}]}}}}};</script>"#;
+		assert_eq!(
+			extract_yt_video_owner_avatar(html).as_deref(),
+			Some("https://yt3.googleusercontent.com/owner-avatar")
+		);
+	}
+
+	// A page without `ytInitialData`, a blob that isn't valid JSON, a
+	// missing owner path, or an empty `thumbnails` array all degrade to
+	// `None`.
+	#[test]
+	fn yt_video_owner_avatar_missing() {
+		assert_eq!(extract_yt_video_owner_avatar("<html>no data</html>"), None);
+		let bad_json = r#"<script>var ytInitialData = {not valid};</script>"#;
+		assert_eq!(extract_yt_video_owner_avatar(bad_json), None);
+		let missing_path = r#"<script>var ytInitialData = {"contents":{"other":1}};</script>"#;
+		assert_eq!(extract_yt_video_owner_avatar(missing_path), None);
+		let empty_sources = r#"<script>var ytInitialData = {"contents":{"twoColumnWatchNextResults":{"results":{"results":{"contents":[{"videoSecondaryInfoRenderer":{"owner":{"videoOwnerRenderer":{"thumbnail":{"thumbnails":[]}}}}}]}}}}};</script>"#;
+		assert_eq!(extract_yt_video_owner_avatar(empty_sources), None);
+	}
+}
