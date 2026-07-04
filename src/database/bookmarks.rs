@@ -194,3 +194,183 @@ pub(crate) fn duplicate_error(
 			Some((id, title)) => anyhow::anyhow!(
 				"keyword \"{}\" already in use by bookmark #{id} ({title})",
 				keyword.unwrap_or_default()
+			),
+			None => anyhow::anyhow!("a bookmark with this URL or keyword already exists"),
+		},
+	}
+}
+
+pub fn insert(conn: &Connection, new: &NewBookmark) -> Result<i64> {
+	// Media resolution (the precedence logic + any network fetch) lives in
+	// `core::media`, shared with the HTTP layer. The HTTP handler resolves
+	// first — on a separate blocking task, without holding the writer — and
+	// calls `insert_resolved`; `insert` is the convenience wrapper that
+	// resolves then inserts.
+	let media = media::resolve_new(new).map_err(anyhow::Error::msg)?;
+	insert_resolved(conn, new, media)
+}
+
+/// Runs the friendly duplicate pre-checks for a *new* bookmark (URL, then
+/// keyword). Split out so the HTTP handler can reject a duplicate request
+/// *before* resolving media — a colliding save must not trigger a needless
+/// network fetch or cache write.
+pub fn check_insert_collisions(conn: &Connection, new: &NewBookmark) -> Result<()> {
+	// An empty string and "no keyword" are the same thing on creation —
+	// if we inserted "" literally, a second bookmark with no keyword would
+	// fail the partial unique index on keyword (unlike NULL, two empty
+	// strings do collide under a UNIQUE index).
+	let keyword = new.keyword.clone().filter(|k| !k.is_empty());
+
+	// Friendly duplicate detection: check before the INSERT so the user
+	// gets a clear message instead of a raw UNIQUE-constraint error.
+	// Only *active* rows collide — a trashed bookmark with the same URL or
+	// keyword never blocks re-adding it (partial unique indexes).
+	if let Some((existing_id, existing_title)) = find_url_owner(conn, &new.url, -1)? {
+		anyhow::bail!("URL already exists as bookmark #{existing_id} ({existing_title})");
+	}
+	if let Some(keyword) = keyword.as_deref()
+		&& let Some((existing_id, existing_title)) = find_keyword_owner(conn, keyword, -1)?
+	{
+		anyhow::bail!(
+			"keyword \"{keyword}\" already in use by bookmark #{existing_id} ({existing_title})"
+		);
+	}
+	Ok(())
+}
+
+/// Persistence-only insert: the caller has already resolved media via
+/// `core::media::resolve_new` (so the HTTP layer never holds the writer
+/// lock across a network fetch). `insert` wraps this with the resolution.
+pub fn insert_resolved(
+	conn: &Connection,
+	new: &NewBookmark,
+	media: media::ResolvedMedia,
+) -> Result<i64> {
+	// Blank/missing category → default. `filter` distinguishes "not sent"
+	// from "sent but blank"; both mean the default category.
+	let category_name = new
+		.category
+		.as_deref()
+		.filter(|c| !c.trim().is_empty())
+		.unwrap_or(crate::model::DEFAULT_CATEGORY);
+	let category_id = get_or_create(conn, category_name)?;
+	let domain = extract_domain(&new.url);
+	check_insert_collisions(conn, new)?;
+
+	let title = new
+		.title
+		.clone()
+		.filter(|t| !t.trim().is_empty())
+		.unwrap_or_else(|| new.url.clone());
+
+	if let Err(err) = conn.execute(
+		"INSERT INTO bookmarks
+            (title, url, description, domain, category_id, starred, keyword, note,
+             favicon, thumbnail, is_archived)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+		params![
+			title,
+			new.url,
+			new.description,
+			domain,
+			category_id,
+			new.starred.unwrap_or(false),
+			new.keyword.clone().filter(|k| !k.is_empty()),
+			new.note,
+			media.favicon,
+			media.thumbnail,
+			new.is_archived.unwrap_or(false),
+		],
+	) {
+		// A concurrent writer can slip a duplicate past the pre-checks;
+		// the UNIQUE index catches it and must surface as the same friendly
+		// message, not a raw constraint string (the HTTP layer would
+		// otherwise classify the 2067 into a generic 500).
+		if is_unique_violation(&err) {
+			return Err(duplicate_error(conn, &new.url, keyword(new).as_deref(), -1));
+		}
+		return Err(err).context("failed to insert bookmark");
+	}
+
+	let id = conn.last_insert_rowid();
+
+	// A `tags` request on creation is a full replacement of an empty set —
+	// `set_bookmark_tags` deletes (nothing) then inserts the given list.
+	if let Some(tags) = &new.tags {
+		set_bookmark_tags(conn, id, tags)?;
+	}
+
+	crate::log_trace!("inserted bookmark #{id} ({title:?}, domain {domain:?})");
+	Ok(id)
+}
+
+/// The keyword tri-state used by `insert`-family duplicate handling: an
+/// empty string and "no keyword" are the same thing on creation.
+fn keyword(new: &NewBookmark) -> Option<String> {
+	new.keyword.clone().filter(|k| !k.is_empty())
+}
+
+/// Fetches one active bookmark by id. Trashed bookmarks are invisible to
+/// this read — the recycle bin has its own query (`list` with `trash=true`).
+pub fn get(conn: &Connection, id: i64) -> Result<Option<Bookmark>> {
+	let sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id
+         WHERE b.id = ?1 AND b.trashed_at IS NULL"
+	);
+	let bookmark = conn
+		.query_row(&sql, params![id], row_to_bookmark)
+		.optional()?;
+	match bookmark {
+		Some(mut b) => {
+			b.tags = get_bookmark_tags(conn, b.id)?;
+			crate::log_trace!("fetched bookmark #{id} ({:?})", b.title);
+			Ok(Some(b))
+		}
+		None => {
+			crate::log_trace!("bookmark #{id} not found or trashed");
+			Ok(None)
+		}
+	}
+}
+
+/// Fetches the active bookmark that owns a keyword shortcut — the lookup
+/// behind `/keywords/{keyword}`.
+///
+/// Matching is case-insensitive (`II` / `Ii` / `ii` are the same shortcut):
+/// keywords are typed into a browser address bar, and the NOCASE collation
+/// is exactly the ASCII fold the `is_valid_keyword` charset guarantees.
+/// `ORDER BY id LIMIT 1` is a deterministic tiebreak for pre-existing
+/// mixed-case rows that the old BINARY unique index let coexist.
+pub fn get_by_keyword(conn: &Connection, keyword: &str) -> Result<Option<Bookmark>> {
+	let sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id
+         WHERE b.keyword = ?1 COLLATE NOCASE AND b.trashed_at IS NULL
+         ORDER BY b.id ASC LIMIT 1"
+	);
+	let bookmark = conn
+		.query_row(&sql, params![keyword], row_to_bookmark)
+		.optional()?;
+	match bookmark {
+		Some(mut b) => {
+			b.tags = get_bookmark_tags(conn, b.id)?;
+			crate::log_trace!("keyword {keyword:?} -> bookmark #{}", b.id);
+			Ok(Some(b))
+		}
+		None => {
+			crate::log_trace!("keyword {keyword:?} matches no active bookmark");
+			Ok(None)
+		}
+	}
+}
+
+/// Builds the shared filter → SQL mapping for a `BookmarkFilter`: the
+/// `WHERE` conditions and their bound values, against the aliases used by
+/// the bookmark selects (`b` for bookmarks, `c` for categories).
+///
+/// This is the single source of truth for "what does this filter match",
+/// consumed by `list`, `count`, `select_ids`, and `remove_matching`. They
+/// MUST stay in lockstep — the HTTP `x-total-count` header is `count`'s
+/// result and must equal the length of `list`'s array, and a bulk delete
+/// must touch exactly the rows a dry-run preview showed.
