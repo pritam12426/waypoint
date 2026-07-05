@@ -374,3 +374,232 @@ pub fn get_by_keyword(conn: &Connection, keyword: &str) -> Result<Option<Bookmar
 /// MUST stay in lockstep — the HTTP `x-total-count` header is `count`'s
 /// result and must equal the length of `list`'s array, and a bulk delete
 /// must touch exactly the rows a dry-run preview showed.
+fn build_where(filter: &BookmarkFilter) -> (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) {
+	let mut conditions: Vec<String> = Vec::new();
+	let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+	if filter.trash {
+		// Recycle bin: only trashed bookmarks, no archived/active split.
+		conditions.push("b.trashed_at IS NOT NULL".into());
+	} else {
+		match filter.archived {
+			Some(true) => conditions.push("b.trashed_at IS NULL AND b.is_archived = 1".into()),
+			Some(false) => conditions.push("b.trashed_at IS NULL AND b.is_archived = 0".into()),
+			None => conditions.push("b.trashed_at IS NULL".into()),
+		}
+	}
+
+	if let Some(cat) = &filter.category {
+		conditions.push("c.name = ?".into());
+		values.push(Box::new(cat.clone()));
+	}
+	if let Some(category_id) = filter.category_id {
+		conditions.push("b.category_id = ?".into());
+		values.push(Box::new(category_id));
+	}
+	if let Some(starred) = filter.starred {
+		conditions.push("b.starred = ?".into());
+		values.push(Box::new(starred));
+	}
+	if let Some(tag) = &filter.tag {
+		conditions.push(
+			"b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt \
+			  JOIN tags t ON t.id = bt.tag_id WHERE t.name = ?)"
+				.into(),
+		);
+		values.push(Box::new(tag.clone()));
+	}
+	if let Some(keyword) = &filter.keyword {
+		conditions.push("b.keyword = ? COLLATE NOCASE".into());
+		values.push(Box::new(keyword.clone()));
+	}
+
+	// The six time bounds are already normalized `YYYY-MM-DD HH:MM:SS`
+	// UTC strings (`shared::parse_datetime_bound`), so plain `>=`/`<=`
+	// comparison is chronological — the fixed-width format sorts by value.
+	// A NULL `last_visited_at` (never visited) matches `last_visited_before`
+	// (the `IS NULL` disjunct) but never `last_visited_after` (NULL >= bound
+	// is false in SQL, which is exactly the semantics we want).
+	if let Some(bound) = &filter.created_after {
+		conditions.push("b.created_at >= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.created_before {
+		conditions.push("b.created_at <= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.updated_after {
+		conditions.push("b.updated_at >= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.updated_before {
+		conditions.push("b.updated_at <= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.last_visited_after {
+		conditions.push("b.last_visited_at >= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.last_visited_before {
+		conditions.push("(b.last_visited_at IS NULL OR b.last_visited_at <= ?)".into());
+		values.push(Box::new(bound.clone()));
+	}
+	// `trashed_at` bounds only make sense with `trash: true`; they are what
+	// "empty the trash up to this date" maps onto.
+	if let Some(bound) = &filter.trashed_after {
+		conditions.push("b.trashed_at >= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+	if let Some(bound) = &filter.trashed_before {
+		conditions.push("b.trashed_at <= ?".into());
+		values.push(Box::new(bound.clone()));
+	}
+
+	(conditions, values)
+}
+
+/// Lists bookmarks by filter. Builds a WHERE clause from `BookmarkFilter`
+/// via `build_where` and appends ORDER BY + LIMIT/OFFSET. Must stay in
+/// lockstep with `count` — except for `before_cursor`, which `list` alone
+/// consumes (a cursor describes a *page*, not a filter, so `count` must
+/// report the whole-corpus total, not the current page's remainder).
+///
+/// Ordering: recycle-bin view is most-recently-trashed first; everything
+/// else is newest-created first. Tag filtering uses a subquery on the
+/// junction table so a bookmark with *any* of the tag's links matches once.
+///
+/// Cursor (keyset) pagination: `before_cursor` carries the `(created_at,
+/// id)` of the last row of the previous page, applied as a row-value bound
+/// `(b.created_at, b.id) < (?, ?)` on the same columns the ORDER BY walks.
+/// With `idx_bookmarks_created` that's an index range SEARCH (constant time
+/// regardless of depth) instead of an OFFSET walk. Offset pagination is
+/// still supported and `before_cursor` takes precedence when both are set.
+/// Only the active (created_at) ordering supports a cursor — the trash view
+/// keeps plain offset pagination.
+pub fn list(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<Bookmark>> {
+	let mut sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id"
+	);
+
+	let (conditions, mut values) = build_where(filter);
+	if !conditions.is_empty() {
+		sql.push_str(" WHERE ");
+		sql.push_str(&conditions.join(" AND "));
+	}
+
+	if filter.trash {
+		sql.push_str(" ORDER BY b.trashed_at DESC");
+	} else {
+		// Cursor bound before the ORDER BY: row-value comparison on the same
+		// leading key, so the index SEARCH range and the backwards scan
+		// share one index. Values bind positionally after the filter's.
+		if let Some((created_at, id)) = &filter.before_cursor {
+			if !conditions.is_empty() {
+				sql.push_str(" AND ");
+			} else {
+				sql.push_str(" WHERE ");
+			}
+			sql.push_str("(b.created_at, b.id) < (?, ?)");
+			values.push(Box::new(created_at.clone()));
+			values.push(Box::new(*id));
+		}
+		sql.push_str(" ORDER BY b.created_at DESC");
+	}
+
+	// These two are validated integers (never user-controlled strings), so
+	// splicing them into the SQL text directly carries no injection risk.
+	let limit = filter.limit.unwrap_or(200).clamp(1, MAX_UNPAGINATED);
+	sql.push_str(&format!(" LIMIT {limit}"));
+	// Cursor and offset are mutually exclusive by construction (the HTTP
+	// layer sends one or the other); if both somehow arrive, the cursor wins
+	// — OFFSET on top of a keyset bound would double-skip.
+	if let Some(offset) = filter.offset.filter(|_| filter.before_cursor.is_none()) {
+		sql.push_str(&format!(" OFFSET {}", offset.max(0)));
+	}
+
+	let mut stmt = conn.prepare(&sql)?;
+	// `Box<dyn ToSql>` values are heterogeneous (String vs bool), so they're
+	// re-borrowed as `&dyn ToSql` for the bound-parameter list.
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), row_to_bookmark)?;
+
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!("list_bookmarks: {} rows (limit {limit})", bookmarks.len());
+	attach_tags(conn, bookmarks)
+}
+
+/// Mirrors `list` exactly — same tables, same WHERE conditions (both via
+/// `build_where`) — so the HTTP API can report an exact `X-Total-Count`.
+/// Keep the two in lockstep.
+///
+/// If one of them gains a WHERE clause the other lacks, the header silently
+/// drifts from the real array length; the HTTP tests would catch it, but
+/// the discipline lives here.
+pub fn count(conn: &Connection, filter: &BookmarkFilter) -> Result<i64> {
+	let mut sql = String::from(
+		"SELECT COUNT(*) FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id",
+	);
+
+	let (conditions, values) = build_where(filter);
+	if !conditions.is_empty() {
+		sql.push_str(" WHERE ");
+		sql.push_str(&conditions.join(" AND "));
+	}
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let total = stmt.query_row(param_refs.as_slice(), |row| row.get::<_, i64>(0))?;
+	crate::log_trace!("count_bookmarks: {total} matching");
+	Ok(total)
+}
+
+/// The ids (ascending) of every bookmark a filter matches, unpaginated.
+/// This is the basis for criteria-based removal: `remove_matching` acts on
+/// exactly what this returns, and a dry-run preview shows the same ids.
+pub fn select_ids(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<i64>> {
+	let mut sql =
+		String::from("SELECT b.id FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id");
+
+	let (conditions, values) = build_where(filter);
+	if !conditions.is_empty() {
+		sql.push_str(" WHERE ");
+		sql.push_str(&conditions.join(" AND "));
+	}
+	sql.push_str(" ORDER BY b.id ASC");
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?;
+	let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!("select_ids: {} rows matching", ids.len());
+	Ok(ids)
+}
+
+/// All active bookmarks, unpaginated — used by export, not by the API
+/// `list` endpoint (which goes through `list` and its default page size).
+pub fn list_all_active(conn: &Connection) -> Result<Vec<Bookmark>> {
+	let filter = BookmarkFilter {
+		limit: Some(MAX_UNPAGINATED),
+		..Default::default()
+	};
+	list(conn, &filter)
+}
+
+/// Bookmarks that have a keyword shortcut set, ordered by id ascending —
+/// used by the `/keywords` route.
+///
+/// Unlike `list`, the keyword predicate is unconditional (a keyword exists
+/// and is non-empty); the archived filter still applies.
+pub fn list_keywords(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<Bookmark>> {
+	let mut sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id"
+	);
+
+	// Seed with the one condition `list` doesn't have, then reuse the same
+	// filter-condition block via `build_where` (archived/category/starred/
+	// tag/keyword/time bounds).
+	let mut conditions: Vec<String> = vec!["b.keyword IS NOT NULL AND b.keyword != ''".into()];
+	let (mut filter_conditions, values) = build_where(filter);
+	conditions.append(&mut filter_conditions);
