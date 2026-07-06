@@ -1025,3 +1025,182 @@ pub fn remove_ids(conn: &Connection, ids: &[i64], purge: bool) -> Result<BulkRem
 /// WHERE clauses from the same source so the `x-total-count` header always
 /// matches the results array — a narrowed search counts exactly the rows it
 /// returns.
+fn append_search_filters(
+	filter: &BookmarkFilter,
+	conditions: &mut Vec<String>,
+	values: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+	if let Some(cat) = &filter.category {
+		conditions.push("c.name = ?".into());
+		values.push(Box::new(cat.clone()));
+	}
+	if let Some(tag) = &filter.tag {
+		conditions.push(
+			"b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt \
+			  JOIN tags t ON t.id = bt.tag_id WHERE t.name = ?)"
+				.into(),
+		);
+		values.push(Box::new(tag.clone()));
+	}
+	if let Some(keyword) = &filter.keyword {
+		conditions.push("b.keyword = ? COLLATE NOCASE".into());
+		values.push(Box::new(keyword.clone()));
+	}
+}
+
+/// Full-text search over title/description/note/url.
+///
+/// The query is wrapped as an escaped FTS5 phrase (`"..."`, with internal
+/// `"` doubled) before binding, rather than passed through as a raw FTS5
+/// query string. Free-text user input containing characters that are
+/// meaningful to FTS5 syntax — an unmatched quote, `*`, `:`, `NEAR`, a
+/// column filter — would otherwise make MATCH return a runtime syntax
+/// error instead of a search result.
+///
+/// Searches the main index only (`bookmarks_fts`), which holds active,
+/// non-archived content. Results are ranked by FTS5 relevance. `filter`
+/// narrows at the SQL level by category/tag/keyword (see
+/// `append_search_filters`).
+pub fn search(
+	conn: &Connection,
+	query: &str,
+	limit: i64,
+	filter: &BookmarkFilter,
+) -> Result<Vec<Bookmark>> {
+	let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+	let mut conditions: Vec<String> = vec![
+		"bookmarks_fts MATCH ?1".into(),
+		"b.trashed_at IS NULL".into(),
+		"b.is_archived = 0".into(),
+	];
+	let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(fts_query.clone())];
+	append_search_filters(filter, &mut conditions, &mut values);
+	let limit = limit.clamp(1, MAX_PAGE_SIZE);
+	let sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks_fts f
+         JOIN bookmarks b ON b.id = f.rowid
+         LEFT JOIN categories c ON c.id = b.category_id
+         WHERE {}
+         ORDER BY rank
+         LIMIT ?{}",
+		conditions.join(" AND "),
+		values.len() + 1
+	);
+	values.push(Box::new(limit));
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), row_to_bookmark)?;
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!(
+		"search {query:?} (fts query {fts_query:?}) -> {} results (limit {limit})",
+		bookmarks.len()
+	);
+	attach_tags(conn, bookmarks)
+}
+
+/// Like `search`, but over the archive index: only archived (non-trashed)
+/// bookmarks. Archived content lives in `bookmarks_fts_archived`,
+/// physically separate from the main corpus, so this is the only place
+/// archived bookmarks surface in search.
+pub fn search_archived(
+	conn: &Connection,
+	query: &str,
+	limit: i64,
+	filter: &BookmarkFilter,
+) -> Result<Vec<Bookmark>> {
+	let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+	let mut conditions: Vec<String> = vec![
+		"bookmarks_fts_archived MATCH ?1".into(),
+		"b.trashed_at IS NULL".into(),
+		"b.is_archived = 1".into(),
+	];
+	let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(fts_query)];
+	append_search_filters(filter, &mut conditions, &mut values);
+	let limit = limit.clamp(1, MAX_PAGE_SIZE);
+	let sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks_fts_archived f
+         JOIN bookmarks b ON b.id = f.rowid
+         LEFT JOIN categories c ON c.id = b.category_id
+         WHERE {}
+         ORDER BY rank
+         LIMIT ?{}",
+		conditions.join(" AND "),
+		values.len() + 1
+	);
+	values.push(Box::new(limit));
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), row_to_bookmark)?;
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!(
+		"search (archive index) {query:?} -> {} results (limit {limit})",
+		bookmarks.len()
+	);
+	attach_tags(conn, bookmarks)
+}
+
+/// Total number of bookmarks matching a full-text query in the given index.
+/// `archived` picks the archive index (`bookmarks_fts_archived`) instead of
+/// the main one, mirroring `search` vs `search_archived`. Used for the
+/// `x-total-count` header on `/api/search`. `filter` applies the same
+/// category/tag/keyword narrowing as the search itself.
+pub fn count_search(
+	conn: &Connection,
+	query: &str,
+	archived: bool,
+	filter: &BookmarkFilter,
+) -> Result<i64> {
+	let table = if archived {
+		"bookmarks_fts_archived"
+	} else {
+		"bookmarks_fts"
+	};
+	let fts_query = format!("\"{}\"", query.replace('"', "\"\""));
+	let mut conditions: Vec<String> = vec![format!("{table} MATCH ?1")];
+	let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(fts_query)];
+	append_search_filters(filter, &mut conditions, &mut values);
+	let sql = format!(
+		"SELECT COUNT(*) FROM {table} f
+		 JOIN bookmarks b ON b.id = f.rowid
+		 LEFT JOIN categories c ON c.id = b.category_id
+		 WHERE {}",
+		conditions.join(" AND ")
+	);
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let total = stmt.query_row(param_refs.as_slice(), |row| row.get::<_, i64>(0))?;
+	crate::log_trace!("count_search {query:?} (archive={archived}) -> {total}");
+	Ok(total)
+}
+
+/// Fetches bookmarks by id, active only, in id order. Used by the API's
+/// bulk read paths.
+///
+/// Builds the `IN (...)` placeholder list from the id count; ids are i64s
+/// from the caller (never user strings), so splicing the placeholder count
+/// is safe. Empty input short-circuits to an empty result.
+pub fn get_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Bookmark>> {
+	if ids.is_empty() {
+		crate::log_trace!("get_by_ids([]) -> 0 rows");
+		return Ok(Vec::new());
+	}
+	let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+	let sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id
+         WHERE b.id IN ({}) AND b.trashed_at IS NULL
+         ORDER BY b.id ASC",
+		placeholders.join(", ")
+	);
+	let mut stmt = conn.prepare(&sql)?;
+	let params: Vec<&dyn rusqlite::ToSql> =
+		ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+	let rows = stmt.query_map(params.as_slice(), row_to_bookmark)?;
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!("get_by_ids({ids:?}) -> {} rows", bookmarks.len());
+	attach_tags(conn, bookmarks)
+}
