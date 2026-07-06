@@ -603,3 +603,236 @@ pub fn list_keywords(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<B
 	let mut conditions: Vec<String> = vec!["b.keyword IS NOT NULL AND b.keyword != ''".into()];
 	let (mut filter_conditions, values) = build_where(filter);
 	conditions.append(&mut filter_conditions);
+
+	sql.push_str(" WHERE ");
+	sql.push_str(&conditions.join(" AND "));
+
+	sql.push_str(" ORDER BY b.id ASC");
+
+	let limit = filter.limit.unwrap_or(50).clamp(1, MAX_UNPAGINATED);
+	sql.push_str(&format!(" LIMIT {limit}"));
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), row_to_bookmark)?;
+
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	attach_tags(conn, bookmarks)
+}
+
+/// Applies a partial update to an active bookmark. Returns `Some` with the
+/// *pre-update* bookmark (the caller uses it for the change log and audit
+/// message) or `None` if the id doesn't exist or is trashed.
+///
+/// The tri-state fields (`keyword`, and the `Option`s generally) mean
+/// "not sent" leaves the current value alone, while `Some("")` clears.
+///
+/// `update` runs the full pipeline: read → collision pre-check → resolve
+/// media (`core::media::resolve_update`) → persist. The HTTP handler runs
+/// the same pieces but resolves media *first* (on a separate blocking task,
+/// without holding the writer) and then calls `update_resolved`.
+pub fn update(conn: &Connection, id: i64, update: &UpdateBookmark) -> Result<Option<Bookmark>> {
+	let Some(existing) = get(conn, id)? else {
+		return Ok(None);
+	};
+	check_update_collisions(conn, &existing, update)?;
+	let media = media::resolve_update(&existing, update).map_err(anyhow::Error::msg)?;
+	update_resolved(conn, id, update, &existing, media)
+}
+
+/// Friendly duplicate URL/keyword detection for an update, scoped to *other*
+/// active rows — re-saving the current URL/keyword (a no-op resend) must not
+/// trip it. Runs *before* media resolution so a collision can't trigger a
+/// needless network fetch or cache write (the HTTP handler calls it on its
+/// read connection for the same reason).
+pub fn check_update_collisions(
+	conn: &Connection,
+	existing: &Bookmark,
+	update: &UpdateBookmark,
+) -> Result<()> {
+	let id = existing.id;
+	// "URL changed" means the *value* actually differs from the stored one,
+	// not merely that the field was present: the web UI's edit form resends
+	// the URL on every save.
+	if update.url.as_deref().is_some_and(|u| u != existing.url)
+		&& let Some((other_id, other_title)) = find_url_owner(
+			conn,
+			&update.url.clone().unwrap_or_else(|| existing.url.clone()),
+			id,
+		)? {
+		anyhow::bail!("URL already exists as bookmark #{other_id} ({other_title})");
+	}
+
+	// Tri-state: None = unchanged, Some("") = clear, Some(x) = set.
+	let keyword = match &update.keyword {
+		Some(k) if k.is_empty() => None,
+		Some(k) => Some(k.clone()),
+		None => existing.keyword.clone(),
+	};
+	// NOCASE keeps the uniqueness gate consistent with the lookup: `II` and
+	// `ii` are the same shortcut, so a case-variant must not be creatable.
+	// The `existing.keyword != kw` guard lets a case-fold of one's own
+	// keyword through (the check excludes this row anyway).
+	if let Some(kw) = keyword.as_deref()
+		&& existing.keyword.as_deref() != Some(kw)
+		&& let Some((other_id, other_title)) = find_keyword_owner(conn, kw, id)?
+	{
+		anyhow::bail!("keyword \"{kw}\" already in use by bookmark #{other_id} ({other_title})");
+	}
+	Ok(())
+}
+
+/// Persistence half of `update`: re-reads the row, re-runs the collision
+/// pre-checks against the *fresh* state, and writes the caller's pre-resolved
+/// media. `seen` is the row the caller resolved media against.
+///
+/// If that row changed in any media-relevant field (url/favicon/thumbnail)
+/// between the caller's read and this write — only a concurrent edit of the
+/// same bookmark can do that — the passed media is stale, so it is
+/// re-resolved against the fresh row. The common path never fetches under
+/// the writer lock.
+pub fn update_resolved(
+	conn: &Connection,
+	id: i64,
+	update: &UpdateBookmark,
+	seen: &Bookmark,
+	media: media::ResolvedMedia,
+) -> Result<Option<Bookmark>> {
+	// Fetch first: we need the current row both to build "unchanged"
+	// defaults and to distinguish a real no-op from a missing bookmark.
+	let Some(existing) = get(conn, id)? else {
+		return Ok(None);
+	};
+	check_update_collisions(conn, &existing, update)?;
+
+	let media = if existing.url != seen.url
+		|| existing.favicon != seen.favicon
+		|| existing.thumbnail != seen.thumbnail
+	{
+		crate::log_trace!(
+			"update #{id}: row changed since media resolution (concurrent edit); re-resolving"
+		);
+		media::resolve_update(&existing, update).map_err(anyhow::Error::msg)?
+	} else {
+		media
+	};
+
+	let title = update
+		.title
+		.clone()
+		.filter(|t| !t.trim().is_empty())
+		.unwrap_or(existing.title.clone());
+	let url = update.url.clone().unwrap_or(existing.url.clone());
+	// Changing the URL re-derives the domain — one update can't leave a
+	// stale domain behind.
+	let domain = extract_domain(&url);
+	// Tri-state: None = unchanged, Some("") = clear, Some(x) = set.
+	let keyword = match &update.keyword {
+		Some(k) if k.is_empty() => None,
+		Some(k) => Some(k.clone()),
+		None => existing.keyword.clone(),
+	};
+	let description = update.description.clone().or(existing.description.clone());
+	let note = update.note.clone().or(existing.note.clone());
+
+	let favicon = media.favicon;
+	let thumbnail = media.thumbnail;
+	let starred = update.starred.unwrap_or(existing.starred);
+	let is_archived = update.is_archived.unwrap_or(existing.is_archived);
+
+	let category_id = match &update.category {
+		Some(cat) if !cat.trim().is_empty() => get_or_create(conn, cat)?,
+		_ => existing.category_id,
+	};
+
+	// A true no-op must leave the row *completely* untouched — including
+	// `updated_at`. The `update_bookmark_timestamp` trigger fires on any
+	// UPDATE that touches one of its `OF` columns, even when the value is
+	// unchanged, so "nothing changed" has to skip the statement entirely.
+	// We don't compare `domain`: it's a pure function of `url`, so it can't
+	// change when `url` doesn't.
+	let changed = title != existing.title
+		|| url != existing.url
+		|| description != existing.description
+		|| note != existing.note
+		|| favicon != existing.favicon
+		|| thumbnail != existing.thumbnail
+		|| starred != existing.starred
+		|| is_archived != existing.is_archived
+		|| keyword != existing.keyword
+		|| category_id != existing.category_id;
+
+	if changed {
+		if let Err(err) = conn.execute(
+			"UPDATE bookmarks SET
+	            title = ?1, url = ?2, description = ?3, domain = ?4, category_id = ?5,
+	            starred = ?6, keyword = ?7, note = ?8, favicon = ?9, thumbnail = ?10,
+	            is_archived = ?11, updated_at = CURRENT_TIMESTAMP
+	         WHERE id = ?12 AND trashed_at IS NULL",
+			params![
+				title,
+				url,
+				description,
+				domain,
+				category_id,
+				starred,
+				keyword,
+				note,
+				favicon,
+				thumbnail,
+				is_archived,
+				id,
+			],
+		) {
+			// Same race as insert: a concurrent writer can beat the
+			// pre-checks, and the UNIQUE index then fires here.
+			if is_unique_violation(&err) {
+				return Err(duplicate_error(conn, &url, keyword.as_deref(), id));
+			}
+			return Err(err).context("failed to update bookmark");
+		}
+	} else {
+		crate::log_trace!("update #{id}: no fields changed, row left untouched");
+	}
+
+	// Three independent tag semantics: full replace (`tags`), or additive/
+	// subtractive (`add_tags` / `remove_tags`). They can be combined; a
+	// replace plus an add would add then still apply. Callers normally
+	// send one or the other.
+	let tags_before = get_bookmark_tags(conn, id)?;
+	if let Some(tags) = &update.tags {
+		set_bookmark_tags(conn, id, tags)?;
+	}
+	if let Some(add) = &update.add_tags
+		&& !add.is_empty()
+	{
+		add_bookmark_tags(conn, id, add)?;
+	}
+	if let Some(rm) = &update.remove_tags
+		&& !rm.is_empty()
+	{
+		remove_bookmark_tags(conn, id, rm)?;
+	}
+	// Tag edits live in a separate table, outside the timestamp trigger's
+	// `OF` list — bump `updated_at` by hand so a tag-only change still
+	// shows as "last modified".
+	if get_bookmark_tags(conn, id)? != tags_before {
+		conn.execute(
+			"UPDATE bookmarks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+			params![id],
+		)?;
+	}
+
+	crate::log_trace!("updated bookmark #{id} (is_archived={is_archived}, starred={starred})");
+	Ok(Some(existing))
+}
+
+/// Trashes one bookmark inside an open transaction, first permanently
+/// deleting any *older trashed* copies of its URL. The trash must never hold
+/// two bookmarks with the same URL: `remove` → re-add → `remove` would
+/// otherwise pile up stale copies (each new removal is a fresh row). The
+/// newest trashed copy wins; its predecessors are gone for good.
+///
+/// The sibling purge only fires for a live target — the subquery requires
+/// `trashed_at IS NULL` on `id`, so a stale or already-trashed id purges
+/// nothing. Returns whether the target itself was actually trashed.
