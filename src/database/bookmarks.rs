@@ -836,3 +836,192 @@ pub fn update_resolved(
 /// The sibling purge only fires for a live target — the subquery requires
 /// `trashed_at IS NULL` on `id`, so a stale or already-trashed id purges
 /// nothing. Returns whether the target itself was actually trashed.
+fn trash_with_dedup(tx: &rusqlite::Transaction, id: i64) -> Result<bool> {
+	tx.execute(
+		"DELETE FROM bookmarks
+		 WHERE url = (SELECT url FROM bookmarks WHERE id = ?1 AND trashed_at IS NULL)
+		   AND trashed_at IS NOT NULL AND id != ?1",
+		params![id],
+	)?;
+	let changed = tx.execute(
+		"UPDATE bookmarks SET trashed_at = CURRENT_TIMESTAMP
+		 WHERE id = ?1 AND trashed_at IS NULL",
+		params![id],
+	)?;
+	Ok(changed > 0)
+}
+
+/// Soft path of a delete (`DELETE /api/bookmarks/{id}` without purge):
+/// move a bookmark into the trash. Sets `trashed_at`; the FTS trash
+/// trigger removes its search entry. Any older trashed copy of the same
+/// URL is purged first (see `trash_with_dedup`), so the trash stays free
+/// of duplicate URLs.
+/// Returns `false` when the bookmark doesn't exist or is already trashed.
+pub fn trash(conn: &Connection, id: i64) -> Result<bool> {
+	let tx = conn.unchecked_transaction()?;
+	let ok = trash_with_dedup(&tx, id)?;
+	tx.commit()?;
+	crate::log_trace!("trash bookmark #{id}: {ok}");
+	Ok(ok)
+}
+
+/// Pulls a trashed bookmark back out of the recycle bin (sets `trashed_at`
+/// back to NULL). The FTS restore trigger re-adds it to the right index
+/// (main or archive, by its `is_archived` state). Returns `false` when the
+/// bookmark doesn't exist or isn't in the trash.
+///
+/// A trashed bookmark is never restored on top of a live row: a fresh add
+/// of the same URL can coexist with a trashed copy (the partial unique
+/// index skips trash), but restoring would collide with it. That's a
+/// friendly error naming the owner, not a raw UNIQUE-constraint failure —
+/// the same message contract `insert`/`update` use, so the HTTP layer
+/// classifies it as a 409.
+pub fn restore(conn: &Connection, id: i64) -> Result<bool> {
+	// Friendly collision pre-check: if a live (non-trashed) bookmark already
+	// owns this URL, restoring the trashed copy would violate the partial
+	// unique index. `find_url_owner` excludes `id` itself.
+	let url: Option<String> = conn
+		.query_row(
+			"SELECT url FROM bookmarks WHERE id = ?1 AND trashed_at IS NOT NULL",
+			params![id],
+			|row| row.get(0),
+		)
+		.optional()?;
+	let Some(url) = url else {
+		crate::log_trace!("restore bookmark #{id}: false");
+		return Ok(false);
+	};
+	if let Some((owner_id, owner_title)) = find_url_owner(conn, &url, id)? {
+		anyhow::bail!("URL already exists as bookmark #{owner_id} ({owner_title})");
+	}
+
+	// A concurrent writer can slip a live duplicate past the pre-check; the
+	// constraint still fires, so fall back to the same friendly message.
+	match conn.execute(
+		"UPDATE bookmarks SET trashed_at = NULL WHERE id = ?1 AND trashed_at IS NOT NULL",
+		params![id],
+	) {
+		Ok(changed) => {
+			let ok = changed > 0;
+			crate::log_trace!("restore bookmark #{id}: {ok}");
+			Ok(ok)
+		}
+		Err(e) if is_unique_violation(&e) => Err(duplicate_error(conn, &url, None, id)),
+		Err(e) => Err(e.into()),
+	}
+}
+
+/// Permanently removes a bookmark, even one already in the trash (the
+/// purge path of `DELETE /api/bookmarks/{id}`). The FTS delete trigger
+/// cleans up the matching FTS row automatically (the
+/// `WHEN OLD.trashed_at IS NULL` guard means purging trash never double-
+/// `delete`s); ON DELETE CASCADE
+/// cleans up bookmark_tags.
+pub fn purge(conn: &Connection, id: i64) -> Result<bool> {
+	let changed = conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
+	let ok = changed > 0;
+	crate::log_trace!("purge bookmark #{id}: {ok}");
+	Ok(ok)
+}
+
+/// Criteria-based bulk remove: every bookmark matching `filter` is moved to
+/// the trash, or permanently deleted when `purge` is true, all in one
+/// transaction (all-or-nothing — a crash mid-way can't leave a half-trashed
+/// set). `select_ids` picks the ids first, so the result always reports the
+/// exact match set even when nothing was written.
+///
+/// A filter that matches nothing is a harmless no-op, not an error.
+///
+/// The transaction uses `Connection::unchecked_transaction` (the `&self`
+/// variant) rather than `transaction(&mut self)` so callers that only hold
+/// `&Connection` can use it. That's safe here because the connection is
+/// never shared concurrently: the HTTP layer serializes it behind a
+/// `Mutex`.
+pub fn remove_matching(
+	conn: &Connection,
+	filter: &BookmarkFilter,
+	purge: bool,
+) -> Result<BulkRemoveResult> {
+	let ids = select_ids(conn, filter)?;
+	let mut removed = 0;
+	if ids.is_empty() {
+		crate::log_trace!("remove_matching: no rows match the filter");
+		return Ok(BulkRemoveResult { ids, removed });
+	}
+
+	let tx = conn.unchecked_transaction()?;
+	if purge {
+		let mut stmt = tx.prepare("DELETE FROM bookmarks WHERE id = ?1")?;
+		for id in &ids {
+			removed += stmt.execute(params![id])? as i64;
+		}
+	} else {
+		for id in &ids {
+			// `trash_with_dedup` purges any older trashed copy of the URL, so
+			// a criteria-based remove can't stack duplicates in the trash.
+			if trash_with_dedup(&tx, *id)? {
+				removed += 1;
+			}
+		}
+	}
+	tx.commit()?;
+	crate::log_trace!(
+		"remove_matching: {} matched, {} removed (purge={purge})",
+		ids.len(),
+		removed
+	);
+	Ok(BulkRemoveResult { ids, removed })
+}
+
+/// Removes a specific id list in one transaction, trashing or purging each
+/// per `purge`. Stale ids are skipped rather than turning into errors, and
+/// the returned `BulkRemoveResult` carries only the ids that actually
+/// changed, so `dry_run`/result reporting stays truthful. Ids already in
+/// the trash are ignored (a trashed bookmark can't be re-trashed).
+pub fn remove_ids(conn: &Connection, ids: &[i64], purge: bool) -> Result<BulkRemoveResult> {
+	if ids.is_empty() {
+		return Ok(BulkRemoveResult {
+			ids: Vec::new(),
+			removed: 0,
+		});
+	}
+	let tx = conn.unchecked_transaction()?;
+	let mut removed = 0;
+	let mut touched = Vec::new();
+	if purge {
+		let mut stmt = tx.prepare("DELETE FROM bookmarks WHERE id = ?1 AND trashed_at IS NULL")?;
+		for id in ids {
+			let affected = stmt.execute(params![id])?;
+			removed += affected as i64;
+			if affected > 0 {
+				touched.push(*id);
+			}
+		}
+	} else {
+		for id in ids {
+			if trash_with_dedup(&tx, *id)? {
+				removed += 1;
+				touched.push(*id);
+			}
+		}
+	}
+	tx.commit()?;
+	crate::log_trace!(
+		"remove_ids: removed {removed} of {} ids (purge={purge})",
+		ids.len()
+	);
+	Ok(BulkRemoveResult {
+		ids: touched,
+		removed,
+	})
+}
+
+// ============================================================
+// Search (FTS)
+// ============================================================
+
+/// Applies the SQL-level search narrowing (category/tag/keyword) shared by
+/// `search`, `search_archived`, and `count_search`. These three build their
+/// WHERE clauses from the same source so the `x-total-count` header always
+/// matches the results array — a narrowed search counts exactly the rows it
+/// returns.
