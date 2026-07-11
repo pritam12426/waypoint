@@ -328,3 +328,166 @@ fn explicit_media_fields_are_kept() {
 /// URL; changing to a URL with no thumbnail rule clears the stale one. An
 /// explicit value in the same update still wins.
 #[test]
+fn url_change_refreshes_media() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(&conn, &plain_bookmark("https://example.com/one")).unwrap();
+	assert_eq!(
+		bm_db::get(&conn, id).unwrap().unwrap().favicon.as_deref(),
+		Some("https://example.com/favicon.ico")
+	);
+
+	// The default resolution is cache-first for YouTube, so seed the media
+	// cache the way a prior successful fetch would (no network in tests).
+	let first_yt = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+	crate::core::cache::evict(first_yt);
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Favicon,
+		first_yt,
+		"https://yt3.googleusercontent.com/first-channel",
+	);
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Thumbnail,
+		first_yt,
+		"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+	);
+
+	// URL change to YouTube → media follows the new URL (from the cache).
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			url: Some(first_yt.to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://yt3.googleusercontent.com/first-channel")
+	);
+	assert_eq!(
+		b.thumbnail.as_deref(),
+		Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+	);
+
+	// URL change back to a rule-less site → thumbnail cleared, favicon
+	// re-resolved to the new domain.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			url: Some("https://other.example/page".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://other.example/favicon.ico")
+	);
+	assert_eq!(b.thumbnail, None);
+
+	// An explicit favicon in the same URL-changing update wins over the
+	// derivation; the thumbnail comes from the (seeded) cache.
+	let second_yt = "https://www.youtube.com/watch?v=AbCdEf123";
+	crate::core::cache::evict(second_yt);
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Thumbnail,
+		second_yt,
+		"https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg",
+	);
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			url: Some(second_yt.to_string()),
+			favicon: Some("https://cdn.example/keep-this.png".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://cdn.example/keep-this.png")
+	);
+	assert_eq!(
+		b.thumbnail.as_deref(),
+		Some("https://i.ytimg.com/vi/AbCdEf123/hqdefault.jpg")
+	);
+}
+
+/// An update that doesn't touch the URL leaves the stored media alone.
+#[test]
+fn url_unchanged_keeps_media() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(&conn, &plain_bookmark("https://example.com/one")).unwrap();
+	let favicon = bm_db::get(&conn, id).unwrap().unwrap().favicon.clone();
+
+	// Title-only update: URL untouched, media must not be recomputed.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			title: Some("Renamed".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(b.title, "Renamed");
+	assert_eq!(b.favicon, favicon);
+}
+
+/// Resending the *same* URL value — exactly what the web UI's edit form does
+/// on every save — must not re-derive media. Only an actual URL change may
+/// recompute (and clobber) custom favicon/thumbnail URLs.
+#[test]
+fn url_resent_unchanged_keeps_custom_media() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let mut new = plain_bookmark("https://example.com/one");
+	new.favicon = Some("https://cdn.example/custom-icon.png".to_string());
+	new.thumbnail = Some("https://cdn.example/custom-thumb.png".to_string());
+	let id = bm_db::insert(&conn, &new).unwrap();
+
+	// The edit form resends the stored URL verbatim alongside a title change.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			title: Some("Renamed".to_string()),
+			url: Some("https://example.com/one".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(b.title, "Renamed");
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://cdn.example/custom-icon.png")
+	);
+	assert_eq!(
+		b.thumbnail.as_deref(),
+		Some("https://cdn.example/custom-thumb.png")
+	);
+}
+
+/// `refresh` (the `--refresh` flag) re-fetches favicon/thumbnail even when
+/// the URL is unchanged, bypassing the fetched-media cache. Here a cached
+/// value exists: plain `Fetch` mode honors it, but `refresh: true` ignores
+/// it and re-scrapes — the connection-refused fetch degrades to the domain
+/// fallback, and since offline fallbacks are never cached the stale value
+/// stays gone.
+#[test]
