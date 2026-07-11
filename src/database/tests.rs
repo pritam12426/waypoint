@@ -491,3 +491,197 @@ fn url_resent_unchanged_keeps_custom_media() {
 /// fallback, and since offline fallbacks are never cached the stale value
 /// stays gone.
 #[test]
+fn refresh_bypasses_the_media_cache() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let url = "http://127.0.0.1:1/db-refresh";
+	let id = bm_db::insert(&conn, &plain_bookmark(url)).unwrap();
+
+	// Cache a fake "successful" fetch for this URL, then re-fetch in
+	// `Fetch` mode: the cache is honored.
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Favicon,
+		url,
+		"https://cached.example/icon.png",
+	);
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			favicon_mode: Some(AssetMode::Fetch),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(
+		bm_db::get(&conn, id).unwrap().unwrap().favicon.as_deref(),
+		Some("https://cached.example/icon.png")
+	);
+
+	// `refresh: true` skips the cache and re-scrapes now; the
+	// connection-refused fetch degrades to the generic domain favicon.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			refresh: true,
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(
+		bm_db::get(&conn, id).unwrap().unwrap().favicon.as_deref(),
+		Some("http://127.0.0.1:1/favicon.ico")
+	);
+}
+
+/// The empty-string sentinel (`--no-custom-favicon` / `--no-thumbnail`):
+/// insert with `favicon: Some("")` stores the generic domain favicon (the
+/// rule table is skipped entirely), and `thumbnail: Some("")` stores none —
+/// even for a YouTube URL that would otherwise derive a CDN thumbnail.
+#[test]
+fn insert_sentinel_forces_generic_media() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string(),
+			title: None,
+			description: None,
+			category: None,
+			tags: None,
+			keyword: None,
+			note: None,
+			favicon: Some(String::new()),
+			thumbnail: Some(String::new()),
+			favicon_mode: None,
+			thumbnail_mode: None,
+			starred: None,
+			is_archived: None,
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://www.youtube.com/favicon.ico")
+	);
+	assert_eq!(b.thumbnail, None);
+}
+
+/// `update` with the sentinel resets media regardless of URL change: the
+/// favicon snaps to the generic domain favicon and the thumbnail clears.
+/// An explicit URL in the same update still wins for the favicon's target
+/// domain.
+#[test]
+fn update_sentinel_resets_media() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	// A bookmark with custom media from the "before" state.
+	let id = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://example.com/one".to_string(),
+			title: None,
+			description: None,
+			category: None,
+			tags: None,
+			keyword: None,
+			note: None,
+			favicon: Some("https://cdn.example/custom-icon.png".to_string()),
+			thumbnail: Some("https://cdn.example/custom-thumb.png".to_string()),
+			favicon_mode: None,
+			thumbnail_mode: None,
+			starred: None,
+			is_archived: None,
+		},
+	)
+	.unwrap();
+
+	// No URL change: reset favicon to the *current* domain's generic
+	// favicon, clear the thumbnail.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			favicon: Some(String::new()),
+			thumbnail: Some(String::new()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://example.com/favicon.ico")
+	);
+	assert_eq!(b.thumbnail, None);
+
+	// With a URL change, the generic favicon follows the new domain.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			url: Some("https://other.example/page".to_string()),
+			favicon: Some(String::new()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://other.example/favicon.ico")
+	);
+	assert_eq!(b.thumbnail, None);
+}
+
+// ============================================================
+// Media modes (Auto / Default / Fetch) and criteria-based removal
+// ============================================================
+
+use crate::model::{AssetMode, BookmarkFilter, DEFAULT_FAVICON, DEFAULT_THUMBNAIL};
+
+/// A bookmark with a category and tag set, plus a keyword.
+fn tagged_bookmark(url: &str, category: &str, tag: &str, keyword: Option<&str>) -> NewBookmark {
+	let mut b = plain_bookmark(url);
+	b.category = Some(category.to_string());
+	b.tags = Some(vec![tag.to_string()]);
+	b.keyword = keyword.map(str::to_string);
+	b
+}
+
+/// `Default` mode stores the bundled-asset tokens verbatim — the frontend
+/// renders `/favicon.ico` / `/thumb-default.svg` for those, not a remote URL.
+#[test]
+fn insert_default_mode_stores_bundled_asset_tokens() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://example.com/one".to_string(),
+			favicon_mode: Some(AssetMode::Default),
+			thumbnail_mode: Some(AssetMode::Default),
+			..plain_bookmark_media_defaults()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(b.favicon.as_deref(), Some(DEFAULT_FAVICON));
+	assert_eq!(b.thumbnail.as_deref(), Some(DEFAULT_THUMBNAIL));
+}
+
+/// An explicit payload that literally equals a bundled-default token is
+/// refused: it would be stored verbatim and then render as the bundled
+/// asset, not the URL the user meant to save.
+#[test]
