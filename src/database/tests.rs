@@ -888,3 +888,210 @@ fn remove_ids_skips_stale_and_trashed() {
 /// Trash-empty semantics: `trash: true` + `trashed_before` scopes the purge
 /// to bookmarks trashed on or before the bound, and purged rows are gone.
 #[test]
+fn trash_empty_honors_trashed_before_bound() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let a = bm_db::insert(&conn, &plain_bookmark("https://a.example")).unwrap();
+	let b = bm_db::insert(&conn, &plain_bookmark("https://b.example")).unwrap();
+	bm_db::trash(&conn, a).unwrap();
+	bm_db::trash(&conn, b).unwrap();
+	// Pin distinct trash timestamps so the bound distinguishes them.
+	conn.execute(
+		"UPDATE bookmarks SET trashed_at = '2024-01-01 00:00:00' WHERE id = ?1",
+		rusqlite::params![a],
+	)
+	.unwrap();
+	conn.execute(
+		"UPDATE bookmarks SET trashed_at = '2024-06-01 00:00:00' WHERE id = ?1",
+		rusqlite::params![b],
+	)
+	.unwrap();
+
+	// Purging everything trashed before 2024-03-01 gets only the January one.
+	let result = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			trash: true,
+			trashed_before: Some("2024-03-01 23:59:59".to_string()),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	assert_eq!(result.removed, 1);
+	assert_eq!(result.ids, vec![a]);
+	assert!(bm_db::get(&conn, a).unwrap().is_none());
+	assert!(bm_db::get(&conn, b).unwrap().is_none(), "b still in trash");
+
+	// The rest empties out now.
+	let rest = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			trash: true,
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	assert_eq!(rest.removed, 1);
+	assert_eq!(rest.ids, vec![b]);
+}
+
+/// `created_after`/`created_before` bounds are inclusive of whole days: a
+/// bare date picks up everything created that day, start to finish.
+#[test]
+fn time_bounds_cover_whole_days_inclusive() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let a = bm_db::insert(&conn, &plain_bookmark("https://a.example")).unwrap();
+	let b = bm_db::insert(&conn, &plain_bookmark("https://b.example")).unwrap();
+	// Pin explicit timestamps for determinism.
+	conn.execute(
+		"UPDATE bookmarks SET created_at = '2024-01-01 00:00:00' WHERE id = ?1",
+		rusqlite::params![a],
+	)
+	.unwrap();
+	conn.execute(
+		"UPDATE bookmarks SET created_at = '2024-06-01 12:00:00' WHERE id = ?1",
+		rusqlite::params![b],
+	)
+	.unwrap();
+
+	// The whole 2024-01-01 day is included by a bare-date after bound. The
+	// database layer takes pre-normalized `YYYY-MM-DD HH:MM:SS` bounds (the
+	// HTTP layer expands bare dates to 00:00:00 / 23:59:59 via
+	// `shared::parse_datetime_bound`).
+	let day = bm_db::list(
+		&conn,
+		&BookmarkFilter {
+			created_after: Some("2024-01-01 00:00:00".to_string()),
+			created_before: Some("2024-01-01 23:59:59".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(day.len(), 1);
+	assert_eq!(day[0].id, a);
+
+	let midyear = bm_db::list(
+		&conn,
+		&BookmarkFilter {
+			created_after: Some("2024-05-01 00:00:00".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(midyear.len(), 1);
+	assert_eq!(midyear[0].id, b);
+}
+
+/// Search narrowing by tag and category filters the FTS results and the
+/// count agrees with the returned rows.
+#[test]
+fn search_narrows_by_tag_and_category() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let a = bm_db::insert(
+		&conn,
+		&tagged_bookmark("https://a.example/rust-notes", "work", "rust", None),
+	)
+	.unwrap();
+	bm_db::insert(
+		&conn,
+		&tagged_bookmark("https://b.example/rust-guide", "home", "web", None),
+	)
+	.unwrap();
+
+	let results = bm_db::search(
+		&conn,
+		"rust",
+		20,
+		&BookmarkFilter {
+			category: Some("work".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(results.len(), 1);
+	assert_eq!(results[0].id, a);
+	assert_eq!(
+		bm_db::count_search(
+			&conn,
+			"rust",
+			false,
+			&BookmarkFilter {
+				category: Some("work".to_string()),
+				..Default::default()
+			}
+		)
+		.unwrap(),
+		1
+	);
+
+	// Tag narrowing on the same query.
+	let tagged = bm_db::search(
+		&conn,
+		"rust",
+		20,
+		&BookmarkFilter {
+			tag: Some("rust".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(tagged.len(), 1);
+}
+
+/// Keywords are case-insensitive: a browser address bar is informal, so
+/// `II`, `Ii`, and `ii` must all resolve to the same shortcut, and a
+/// case-variant must not be creatable as a second bookmark.
+#[test]
+fn keyword_lookup_is_case_insensitive() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let mut b = tagged_bookmark("https://ii.example", "work", "rust", Some("ii"));
+	b.favicon = None;
+	b.thumbnail = None;
+	let id = bm_db::insert(&conn, &b).unwrap();
+
+	// The lookup folds case in both directions.
+	for kw in ["II", "Ii", "ii"] {
+		let found = bm_db::get_by_keyword(&conn, kw).unwrap();
+		assert_eq!(found.map(|f| f.id), Some(id), "keyword {kw} must match");
+	}
+
+	// A case-variant is the same keyword: the friendly pre-check rejects it.
+	let mut variant = tagged_bookmark("https://other.example", "work", "rust", Some("II"));
+	variant.favicon = None;
+	variant.thumbnail = None;
+	let err = bm_db::insert(&conn, &variant).unwrap_err().to_string();
+	assert!(
+		err.contains("already in use"),
+		"case-variant must conflict: {err}"
+	);
+
+	// The filter paths are case-insensitive too.
+	let list = bm_db::list(
+		&conn,
+		&BookmarkFilter {
+			keyword: Some("II".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(list.len(), 1);
+}
+
+/// A URL-changing `update` that collides with another *active* bookmark's
+/// URL is rejected up front — before any media resolution — so it can't
+/// trigger a needless network fetch or cache write for the colliding URL.
+/// Re-sending the current URL (a no-op resend) must not trip it.
+#[test]
