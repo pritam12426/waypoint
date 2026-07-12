@@ -1095,3 +1095,136 @@ fn keyword_lookup_is_case_insensitive() {
 /// trigger a needless network fetch or cache write for the colliding URL.
 /// Re-sending the current URL (a no-op resend) must not trip it.
 #[test]
+fn update_rejects_colliding_url_before_media_resolution() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	// Insert A (YouTube, cache-seeded so no network), then B. The video id
+	// must be unique to this test: tests share one per-process cache dir, so
+	// a URL used by another test would let this one's `evict` race it.
+	let a_url = "https://www.youtube.com/watch?v=UuNu1q3dQw4";
+	crate::core::cache::evict(a_url);
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Favicon,
+		a_url,
+		"https://yt3.googleusercontent.com/avatar",
+	);
+	let a_id = bm_db::insert(&conn, &plain_bookmark(a_url)).unwrap();
+	let b_id = bm_db::insert(&conn, &plain_bookmark("https://example.com/two")).unwrap();
+
+	// Drop A's cached media as if it had expired: without the guard, the
+	// colliding update would re-fetch it (network + cache write).
+	crate::core::cache::evict(a_url);
+	assert_eq!(
+		crate::core::cache::get(crate::core::media::MediaTarget::Favicon, a_url),
+		None,
+		"precondition: A's media cache is empty"
+	);
+
+	// Changing B's URL to A's URL is a friendly error...
+	let err = bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			url: Some(a_url.to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(
+		err.contains("URL already exists as bookmark") && err.contains(&format!("#{a_id}")),
+		"expected a friendly duplicate error, got: {err}"
+	);
+
+	// ...and it must not have fetched/cached anything for the colliding URL,
+	// nor touched B's row.
+	assert_eq!(
+		crate::core::cache::get(crate::core::media::MediaTarget::Favicon, a_url),
+		None,
+		"the colliding update must not populate the media cache"
+	);
+	let b = bm_db::get(&conn, b_id).unwrap().unwrap();
+	assert_eq!(b.url, "https://example.com/two");
+
+	// Re-sending the current URL is not a collision.
+	bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			url: Some("https://example.com/two".to_string()),
+			title: Some("renamed".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(bm_db::get(&conn, b_id).unwrap().unwrap().title, "renamed");
+}
+
+/// A keyword-changing `update` that collides with another *active* bookmark's
+/// keyword is rejected up front — before any media resolution — so it can't
+/// trigger a needless network fetch or cache write for the new URL. The
+/// collision check is NOCASE (a case-variant is the same shortcut), and
+/// re-saving / case-folding one's own keyword is not a collision.
+#[test]
+fn update_rejects_colliding_keyword_before_media_resolution() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	// A owns keyword "alpha". B is plain. The video id must be unique to
+	// this test: tests share one per-process cache dir.
+	let a_url = "https://www.youtube.com/watch?v=AaBb3cDdEe4";
+	crate::core::cache::evict(a_url);
+	crate::core::cache::put(
+		crate::core::media::MediaTarget::Favicon,
+		a_url,
+		"https://yt3.googleusercontent.com/avatar",
+	);
+	let a_id = bm_db::insert(
+		&conn,
+		&tagged_bookmark(a_url, "work", "rust", Some("alpha")),
+	)
+	.unwrap();
+	let b_url = "https://example.com/two";
+	let b_id = bm_db::insert(&conn, &plain_bookmark(b_url)).unwrap();
+
+	// A fresh URL whose cache is empty: if the keyword check didn't run
+	// first, a URL-changing update would fetch media for it.
+	let colliding_url = "https://www.youtube.com/watch?v=FfGg5hHhIi6";
+	crate::core::cache::evict(colliding_url);
+	assert_eq!(
+		crate::core::cache::get(crate::core::media::MediaTarget::Favicon, colliding_url),
+		None,
+		"precondition: colliding URL's media cache is empty"
+	);
+
+	// Changing B's URL to a fresh one *and* grabbing A's keyword is a
+	// friendly error...
+	let err = bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			url: Some(colliding_url.to_string()),
+			keyword: Some("alpha".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(
+		err.contains("keyword \"alpha\" already in use") && err.contains(&format!("#{a_id}")),
+		"expected a friendly keyword error, got: {err}"
+	);
+
+	// ...and it must not have fetched/cached anything for the colliding URL,
+	// nor touched B's row.
+	assert_eq!(
+		crate::core::cache::get(crate::core::media::MediaTarget::Favicon, colliding_url),
+		None,
+		"the colliding update must not populate the media cache"
+	);
+	let b = bm_db::get(&conn, b_id).unwrap().unwrap();
+	assert_eq!(b.url, b_url);
+	assert_eq!(b.keyword, None);
