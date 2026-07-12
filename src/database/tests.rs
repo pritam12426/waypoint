@@ -685,3 +685,206 @@ fn insert_default_mode_stores_bundled_asset_tokens() {
 /// refused: it would be stored verbatim and then render as the bundled
 /// asset, not the URL the user meant to save.
 #[test]
+fn insert_rejects_payload_colliding_with_bundled_token() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let err = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://example.com/one".to_string(),
+			favicon: Some(DEFAULT_FAVICON.to_string()),
+			..plain_bookmark_media_defaults()
+		},
+	)
+	.unwrap_err();
+	assert!(err.to_string().contains("bundled-default token"));
+
+	let err = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://example.com/two".to_string(),
+			thumbnail: Some(DEFAULT_THUMBNAIL.to_string()),
+			..plain_bookmark_media_defaults()
+		},
+	)
+	.unwrap_err();
+	assert!(err.to_string().contains("bundled-default token"));
+}
+
+/// `update --mode default` overrides a stored custom favicon: the token
+/// replaces the URL, and `--mode auto` later re-derives from the URL.
+#[test]
+fn update_mode_default_replaces_custom_favicon() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "https://example.com/one".to_string(),
+			favicon: Some("https://cdn.example/custom.png".to_string()),
+			..plain_bookmark_media_defaults()
+		},
+	)
+	.unwrap();
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			favicon_mode: Some(AssetMode::Default),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(b.favicon.as_deref(), Some(DEFAULT_FAVICON));
+
+	// Back to auto: the stored token is replaced by a URL-derived icon.
+	bm_db::update(
+		&conn,
+		id,
+		&UpdateBookmark {
+			favicon_mode: Some(AssetMode::Auto),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://example.com/favicon.ico")
+	);
+}
+
+/// `Fetch` mode degrades to the auto result when the network is unreachable
+/// (connection-refused on `127.0.0.1:1` — no external network in tests).
+#[test]
+fn insert_fetch_mode_degrades_to_auto_on_failure() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id = bm_db::insert(
+		&conn,
+		&NewBookmark {
+			url: "http://127.0.0.1:1/fail".to_string(),
+			favicon_mode: Some(AssetMode::Fetch),
+			thumbnail_mode: Some(AssetMode::Fetch),
+			..plain_bookmark_media_defaults()
+		},
+	)
+	.unwrap();
+	let b = bm_db::get(&conn, id).unwrap().unwrap();
+	assert_eq!(b.favicon.as_deref(), Some("http://127.0.0.1:1/favicon.ico"));
+	assert_eq!(b.thumbnail, None);
+}
+
+/// Criteria removal by tag and by category: only the matching bookmarks
+/// move to the trash, and the returned ids match exactly.
+#[test]
+fn remove_matching_by_tag_and_category() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let a = bm_db::insert(
+		&conn,
+		&tagged_bookmark("https://a.example", "work", "rust", None),
+	)
+	.unwrap();
+	let b = bm_db::insert(
+		&conn,
+		&tagged_bookmark("https://b.example", "work", "web", Some("bh")),
+	)
+	.unwrap();
+	let c = bm_db::insert(
+		&conn,
+		&tagged_bookmark("https://c.example", "home", "rust", None),
+	)
+	.unwrap();
+
+	// Tag filter hits bookmarks across categories.
+	let result = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			tag: Some("rust".to_string()),
+			..Default::default()
+		},
+		false,
+	)
+	.unwrap();
+	assert_eq!(result.removed, 2);
+	assert_eq!(result.ids.len(), 2);
+	assert!(result.ids.contains(&a));
+	assert!(result.ids.contains(&c));
+	for id in [a, c] {
+		assert!(
+			bm_db::get(&conn, id).unwrap().is_none(),
+			"#{id} should be trashed"
+		);
+	}
+	// "web" bookmark b is untouched.
+	assert!(bm_db::get(&conn, b).unwrap().is_some());
+	// Trashed bookmarks are no longer trashed-again eligible; a second run
+	// matches nothing.
+	let again = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			tag: Some("rust".to_string()),
+			..Default::default()
+		},
+		false,
+	)
+	.unwrap();
+	assert_eq!(again.removed, 0);
+	assert!(again.ids.is_empty());
+
+	// Category filter on the remaining active one.
+	let result = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			category: Some("work".to_string()),
+			..Default::default()
+		},
+		false,
+	)
+	.unwrap();
+	assert_eq!(result.removed, 1);
+	assert_eq!(result.ids, vec![b]);
+
+	// Keyword criteria work the same way.
+	let result = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			keyword: Some("bh".to_string()),
+			..Default::default()
+		},
+		false,
+	)
+	.unwrap();
+	assert_eq!(result.removed, 0, "already trashed");
+}
+
+/// `remove_ids` skips stale ids and ids already in the trash; the returned
+/// ids list is exactly what changed.
+#[test]
+fn remove_ids_skips_stale_and_trashed() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let a = bm_db::insert(&conn, &plain_bookmark("https://a.example")).unwrap();
+	let b = bm_db::insert(&conn, &plain_bookmark("https://b.example")).unwrap();
+	bm_db::trash(&conn, b).unwrap();
+
+	let result = bm_db::remove_ids(&conn, &[a, b, 999], false).unwrap();
+	assert_eq!(result.removed, 1, "only the active id is trashed");
+	assert_eq!(result.ids, vec![a]);
+}
+
+/// Trash-empty semantics: `trash: true` + `trashed_before` scopes the purge
+/// to bookmarks trashed on or before the bound, and purged rows are gone.
+#[test]
