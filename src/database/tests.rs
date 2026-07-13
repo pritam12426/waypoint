@@ -1228,3 +1228,214 @@ fn update_rejects_colliding_keyword_before_media_resolution() {
 	let b = bm_db::get(&conn, b_id).unwrap().unwrap();
 	assert_eq!(b.url, b_url);
 	assert_eq!(b.keyword, None);
+
+	// A case-variant is the same keyword: also rejected (and before media).
+	let err = bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			url: Some(colliding_url.to_string()),
+			keyword: Some("ALPHA".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap_err()
+	.to_string();
+	assert!(
+		err.contains("keyword \"ALPHA\" already in use"),
+		"case-variant must conflict: {err}"
+	);
+	assert_eq!(
+		crate::core::cache::get(crate::core::media::MediaTarget::Favicon, colliding_url),
+		None,
+		"the case-variant colliding update must not populate the media cache"
+	);
+
+	// Re-sending the current (absent) keyword is a no-op, not a collision —
+	// clearing without a value must succeed.
+	bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			keyword: Some(String::new()),
+			title: Some("renamed".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(bm_db::get(&conn, b_id).unwrap().unwrap().title, "renamed");
+
+	// Case-folding one's own keyword stays allowed: the collision check
+	// excludes the row being updated.
+	bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			keyword: Some("BETA".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	bm_db::update(
+		&conn,
+		b_id,
+		&UpdateBookmark {
+			keyword: Some("beta".to_string()),
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(
+		bm_db::get(&conn, b_id).unwrap().unwrap().keyword.as_deref(),
+		Some("beta")
+	);
+}
+
+/// `is_unique_violation` recognizes the raw UNIQUE-constraint error (extended
+/// code 2067) that a race between the friendly pre-checks and a concurrent
+/// writer surfaces at INSERT/UPDATE time. The `ffi::Error` fields are public,
+/// so the matcher is testable directly.
+#[test]
+fn is_unique_violation_matches_constraint_unique() {
+	let err = rusqlite::Error::SqliteFailure(
+		rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+		None,
+	);
+	assert!(bm_db::is_unique_violation(&err));
+
+	let other = rusqlite::Error::SqliteFailure(
+		rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL),
+		None,
+	);
+	assert!(!bm_db::is_unique_violation(&other));
+
+	let not_sqlite = rusqlite::Error::InvalidParameterName("nope".into());
+	assert!(!bm_db::is_unique_violation(&not_sqlite));
+}
+
+/// The bookmark used for `insert` in the mode tests: same shape as
+/// `plain_bookmark` but expressed as a spread so the mode fields can be set.
+fn plain_bookmark_media_defaults() -> NewBookmark {
+	NewBookmark {
+		url: String::new(),
+		title: None,
+		description: None,
+		category: None,
+		tags: None,
+		keyword: None,
+		note: None,
+		favicon: None,
+		thumbnail: None,
+		favicon_mode: None,
+		thumbnail_mode: None,
+		starred: None,
+		is_archived: None,
+	}
+}
+
+/// The trash must never hold two bookmarks with the same URL. The
+/// delete → re-add → delete cycle (each `remove` moves a fresh row to the
+/// trash) would otherwise stack stale copies; each new removal purges the
+/// older trashed one, leaving only the newest.
+#[test]
+fn trash_purges_older_trashed_copy_of_the_same_url() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id1 = bm_db::insert(&conn, &plain_bookmark("https://youtube.com/@ch")).unwrap();
+	assert!(bm_db::trash(&conn, id1).unwrap());
+
+	// Re-adding the same URL succeeds — the trashed copy is outside the
+	// partial unique index.
+	let id2 = bm_db::insert(&conn, &plain_bookmark("https://youtube.com/@ch")).unwrap();
+	assert!(bm_db::trash(&conn, id2).unwrap());
+
+	let trashed = bm_db::list(
+		&conn,
+		&BookmarkFilter {
+			trash: true,
+			..Default::default()
+		},
+	)
+	.unwrap();
+	assert_eq!(trashed.len(), 1, "trash holds at most one copy per URL");
+	assert_eq!(trashed[0].id, id2, "the newest trashed copy wins");
+}
+
+/// The single-id, id-list, and filter bulk trash paths all keep the trash
+/// deduplicated (each funnels through `trash_with_dedup`).
+#[test]
+fn bulk_trash_paths_dedup_trash_too() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let trash_len = || {
+		bm_db::list(
+			&conn,
+			&BookmarkFilter {
+				trash: true,
+				..Default::default()
+			},
+		)
+		.unwrap()
+		.len()
+	};
+
+	let a1 = bm_db::insert(&conn, &plain_bookmark("https://dup.example/a")).unwrap();
+	bm_db::trash(&conn, a1).unwrap();
+	let a2 = bm_db::insert(&conn, &plain_bookmark("https://dup.example/a")).unwrap();
+	let res = bm_db::remove_ids(&conn, &[a2], false).unwrap();
+	assert_eq!(res.removed, 1);
+	assert_eq!(
+		trash_len(),
+		1,
+		"remove_ids trashed a2 and purged the old copy"
+	);
+
+	bm_db::insert(&conn, &plain_bookmark("https://dup.example/a")).unwrap();
+	let res = bm_db::remove_matching(
+		&conn,
+		&BookmarkFilter {
+			..Default::default()
+		},
+		false,
+	)
+	.unwrap();
+	assert_eq!(res.removed, 1, "only the live copy matches the filter");
+	assert_eq!(
+		trash_len(),
+		1,
+		"remove_matching trashed a3 and purged the old copy"
+	);
+}
+
+/// Restoring a trashed bookmark whose URL is already owned by a live row is
+/// a friendly error naming the owner — not a raw UNIQUE-constraint failure
+/// (a re-added URL can coexist with its trashed predecessor, but the two
+/// cannot both come back to life).
+#[test]
+fn restore_refuses_when_the_url_is_taken_by_a_live_bookmark() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let conn = open(&path).unwrap();
+
+	let id1 = bm_db::insert(&conn, &plain_bookmark("https://youtube.com/@ch")).unwrap();
+	bm_db::trash(&conn, id1).unwrap();
+	let id2 = bm_db::insert(&conn, &plain_bookmark("https://youtube.com/@ch")).unwrap();
+
+	let err = bm_db::restore(&conn, id1).unwrap_err();
+	assert!(
+		err.to_string()
+			.contains(&format!("URL already exists as bookmark #{id2}")),
+		"unexpected error: {err}"
+	);
+
+	// Restoring the live sibling (its own trashed re-add) still works.
+	assert!(bm_db::trash(&conn, id2).unwrap());
+	assert!(bm_db::restore(&conn, id2).unwrap());
+	let active = bm_db::list(&conn, &BookmarkFilter::default()).unwrap();
+	assert_eq!(active.len(), 1);
+	assert_eq!(active[0].id, id2);
+}
