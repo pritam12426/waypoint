@@ -96,3 +96,102 @@ pub(super) fn validate_bounds(
 	trashed: (Option<String>, Option<String>),
 ) -> Result<(), AppError> {
 	for (label, (after, before)) in [
+		("created", created),
+		("updated", updated),
+		("last_visited", visited),
+		("trashed", trashed),
+	] {
+		shared::validate_time_range(after.as_deref(), before.as_deref(), label)
+			.map_err(AppError::invalid_date)?;
+	}
+	Ok(())
+}
+
+// ============================================================
+// Cached aggregate responses
+// ============================================================
+
+/// Cache key for a paged aggregate endpoint. The underlying queries are
+/// full-corpus GROUP BY / ORDER BY passes, so they are cached server-side
+/// (see `StatsCache`); the key must include pagination because a 50-row
+/// slice and a 200-row slice are different queries.
+pub(super) fn stats_key(endpoint: &str, limit: i64, offset: i64) -> String {
+	format!("{endpoint}:{limit}:{offset}")
+}
+
+/// Runs `compute` against the database and serves its JSON through the
+/// stats cache (30s TTL). Emits `Cache-Control: private, max-age=30`
+/// (matching the server TTL, so the browser can serve the dashboard from
+/// its own cache) and a strong ETag; a matching `If-None-Match` short-
+/// circuits to 304.
+///
+/// `compute` must be a `Fn` (not `FnOnce`) so a copy can be stored with the
+/// cache entry — a successful write then refreshes the body in place via
+/// `AppState::refresh_caches` instead of dropping it and waiting for the
+/// next read to rebuild it.
+pub(super) async fn cached_json<T>(
+	state: &AppState,
+	key: String,
+	if_none_match: Option<&str>,
+	compute: impl Fn(&Connection) -> anyhow::Result<T> + Clone + Send + Sync + 'static,
+) -> Result<Response, AppError>
+where
+	T: serde::Serialize,
+{
+	if let Some(body) = state.stats.get(&key) {
+		crate::log_trace!("cached_json: served {key:?} from stats cache");
+		return Ok(etag_response(body, if_none_match));
+	}
+	crate::log_trace!("cached_json: computing {key:?} (stats cache miss)");
+	let db = state.db.clone();
+	let body = tokio::task::spawn_blocking({
+		let compute = compute.clone();
+		move || {
+			let conn = db.reader();
+			let value = compute(&conn)?;
+			Ok::<_, anyhow::Error>(serde_json::to_vec(&value)?)
+		}
+	})
+	.await??;
+	// Keep a copy of `compute` with the cache entry so `refresh` can
+	// recompute this body after a write (see `cache::StatsCache::refresh`).
+	let refresh = {
+		let compute = compute.clone();
+		Arc::new(move |conn: &Connection| {
+			let value = compute(conn)?;
+			Ok(serde_json::to_vec(&value)?)
+		})
+	};
+	state.stats.put(&key, body.clone(), refresh);
+	Ok(etag_response(body, if_none_match))
+}
+
+/// Wraps JSON bytes with cache headers and honors `If-None-Match`.
+pub(super) fn etag_response(body: Vec<u8>, if_none_match: Option<&str>) -> Response {
+	let etag = body_etag(&body);
+	if if_none_match == Some(etag.as_str()) {
+		crate::log_trace!("etag matched: responding 304 Not Modified");
+		return StatusCode::NOT_MODIFIED.into_response();
+	}
+	crate::log_trace!("etag {}: sending body", etag);
+	(
+		[
+			(header::CONTENT_TYPE, "application/json"),
+			(header::CACHE_CONTROL, "private, max-age=30"),
+			(header::ETAG, etag.as_str()),
+		],
+		body,
+	)
+		.into_response()
+}
+
+/// Deterministic strong ETag from the body bytes. `DefaultHasher` uses the
+/// fixed-key SipHash, so the value is stable across processes — only the
+/// body changes it, which is all a revalidation ETag needs.
+pub(super) fn body_etag(body: &[u8]) -> String {
+	use std::collections::hash_map::DefaultHasher;
+	use std::hash::{Hash, Hasher};
+	let mut hasher = DefaultHasher::new();
+	body.hash(&mut hasher);
+	format!("\"{:016x}\"", hasher.finish())
+}
