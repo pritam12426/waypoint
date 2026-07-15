@@ -211,3 +211,12 @@ mod tests {
 	}
 
 	#[test]
+	fn scope_allows_methods() {
+		assert!(Scope::Full.allows(&Method::POST));
+		assert!(Scope::ReadOnly.allows(&Method::GET));
+		assert!(Scope::ReadOnly.allows(&Method::HEAD));
+		assert!(!Scope::ReadOnly.allows(&Method::POST));
+		assert!(!Scope::ReadOnly.allows(&Method::DELETE));
+		assert!(!Scope::ReadOnly.allows(&Method::PATCH));
+	}
+}
