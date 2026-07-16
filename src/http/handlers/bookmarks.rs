@@ -474,3 +474,125 @@ pub struct DeleteQuery {
 
 /// Remove a bookmark. Moves it to the trash by default; `purge=true`
 /// deletes it permanently.
+#[utoipa::path(
+	delete,
+	path = "/api/bookmarks/{id}",
+	tag = "bookmarks",
+	params(("id" = i64, Path, description = "Bookmark id"), DeleteQuery),
+	responses(
+		(status = 204, description = "Bookmark removed"),
+		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
+	)
+)]
+pub async fn delete_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+	Query(q): Query<DeleteQuery>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} DELETE /api/bookmarks/{id}");
+	validate_id(id)?;
+	let db = state.db.clone();
+	let purge = q.purge.unwrap_or(false);
+	let removed = if purge {
+		tokio::task::spawn_blocking(move || bm_db::purge(&db.writer(), id)).await??
+	} else {
+		tokio::task::spawn_blocking(move || bm_db::trash(&db.writer(), id)).await??
+	};
+
+	if removed {
+		state.refresh_caches().await;
+		if purge {
+			crate::log_info!("{addr} purged bookmark #{id}");
+		} else {
+			crate::log_info!("{addr} moved bookmark #{id} to trash");
+		}
+	}
+	Ok(if removed {
+		StatusCode::NO_CONTENT.into_response()
+	} else {
+		return Err(AppError::not_found("bookmark not found"));
+	})
+}
+
+/// Restore a bookmark from the trash.
+#[utoipa::path(
+	post,
+	path = "/api/bookmarks/{id}/restore",
+	tag = "bookmarks",
+	params(("id" = i64, Path, description = "Bookmark id")),
+	responses(
+		(status = 204, description = "Bookmark restored from trash"),
+		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
+	)
+)]
+pub async fn restore_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} POST /api/bookmarks/{id}/restore");
+	validate_id(id)?;
+	let db = state.db.clone();
+	let restored = tokio::task::spawn_blocking(move || bm_db::restore(&db.writer(), id)).await??;
+	if restored {
+		state.refresh_caches().await;
+	}
+	Ok(if restored {
+		crate::log_info!("{addr} restored bookmark #{id}");
+		StatusCode::NO_CONTENT.into_response()
+	} else {
+		return Err(AppError::not_found("bookmark not found"));
+	})
+}
+
+/// Query parameters for the bulk `DELETE /api/bookmarks` endpoint: either a
+/// comma-separated `ids` list or filter criteria (mutually exclusive), plus
+/// `purge` and `dry_run`. The criteria mirror `ListQuery`'s so a GET
+/// preview and a DELETE use the same shape.
+#[derive(Deserialize, IntoParams)]
+pub struct BulkDeleteQuery {
+	/// Comma-separated bookmark ids to remove (mutually exclusive with the
+	/// filter criteria below).
+	ids: Option<String>,
+	/// Filter by category name.
+	category: Option<String>,
+	/// Filter by category id.
+	category_id: Option<i64>,
+	/// Filter by tag name.
+	tag: Option<String>,
+	/// Filter by keyword shortcut.
+	keyword: Option<String>,
+	/// Filter by starred state.
+	starred: Option<bool>,
+	/// `true` targets only archived bookmarks, `false` only active ones.
+	archived: Option<bool>,
+	/// Target trashed bookmarks instead of live ones (for bulk purge of
+	/// the recycle bin).
+	trash: Option<bool>,
+	/// Only bookmarks created at or after this UTC date/time.
+	created_after: Option<String>,
+	/// Only bookmarks created at or before this UTC date/time.
+	created_before: Option<String>,
+	/// Only bookmarks updated at or after this UTC date/time.
+	updated_after: Option<String>,
+	/// Only bookmarks updated at or before this UTC date/time.
+	updated_before: Option<String>,
+	/// Only bookmarks last visited at or after this UTC date/time.
+	visited_after: Option<String>,
+	/// Only bookmarks last visited at or before this UTC date/time.
+	visited_before: Option<String>,
+	/// Only bookmarks trashed at or after this UTC date/time.
+	trashed_after: Option<String>,
+	/// Only bookmarks trashed at or before this UTC date/time.
+	trashed_before: Option<String>,
+	/// Permanently delete instead of moving to the trash.
+	purge: Option<bool>,
+	/// Report the matching ids/count without changing anything.
+	dry_run: Option<bool>,
+}
+
+/// Bulk-remove bookmarks by id list or filter criteria. Never a catch-all:
+/// calling this without `ids` *and* without any criterion is a 400, so a
+/// bare `DELETE /api/bookmarks` cannot silently gut the database. With
+/// `dry_run=true` the matching ids and count come back with `removed: 0`.
