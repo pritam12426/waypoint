@@ -296,3 +296,181 @@ fn next_link(uri: &Uri, next_cursor: &str) -> Option<String> {
 }
 
 /// Create a new bookmark.
+#[utoipa::path(
+	post,
+	path = "/api/bookmarks",
+	tag = "bookmarks",
+	request_body = NewBookmark,
+	responses(
+		(status = 201, description = "Bookmark created", body = Bookmark),
+		(status = 400, description = "Invalid payload", body = ApiErrorBody),
+		(status = 409, description = "A bookmark with this URL or keyword already exists", body = ApiErrorBody),
+	)
+)]
+pub async fn create_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Json(new): Json<NewBookmark>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} POST /api/bookmarks: {}", new.url);
+	let created_url = new.url.clone();
+	// URL is the only truly required field on `NewBookmark`; validate it
+	// and the (optional) keyword before touching the database.
+	if new.url.trim().is_empty() {
+		return Err(AppError::invalid_url("url is required"));
+	}
+	validate_keyword(new.keyword.as_deref())?;
+
+	// Friendly duplicate rejection first, on a *reader*: a colliding save
+	// must not trigger a needless network fetch or cache write. Media
+	// resolution (potentially network I/O) then runs on its own blocking
+	// task, still without the writer; only the final tight INSERT takes it.
+	let db = state.db.clone();
+	let new_for_check = new.clone();
+	tokio::task::spawn_blocking(move || {
+		bm_db::check_insert_collisions(&db.reader(), &new_for_check)
+	})
+	.await??;
+
+	let new_for_resolve = new.clone();
+	let media =
+		tokio::task::spawn_blocking(move || crate::core::media::resolve_new(&new_for_resolve))
+			.await?
+			.map_err(AppError::invalid_payload)?;
+
+	let db = state.db.clone();
+	let new_for_db = new.clone();
+	let id = tokio::task::spawn_blocking(move || {
+		bm_db::insert_resolved(&db.writer(), &new_for_db, media)
+	})
+	.await??;
+	state.refresh_caches().await;
+	crate::log_info!("{addr} created bookmark #{id}: {created_url}");
+
+	// Re-fetch to return the fully hydrated bookmark (with tags attached
+	// and the category name resolved) rather than echoing the input.
+	let db = state.db.clone();
+	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+
+	Ok((StatusCode::CREATED, Json(bookmark)).into_response())
+}
+
+/// Fetch a single bookmark.
+#[utoipa::path(
+	get,
+	path = "/api/bookmarks/{id}",
+	tag = "bookmarks",
+	params(("id" = i64, Path, description = "Bookmark id")),
+	responses(
+		(status = 200, description = "Bookmark found", body = Bookmark),
+		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
+	)
+)]
+pub async fn get_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} GET /api/bookmarks/{id}");
+	validate_id(id)?;
+	let db = state.db.clone();
+	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+	match bookmark {
+		Some(b) => Ok(Json(b).into_response()),
+		None => Err(AppError::not_found("bookmark not found")),
+	}
+}
+
+/// Update a bookmark (partial update: omitted fields are unchanged).
+#[utoipa::path(
+	put,
+	path = "/api/bookmarks/{id}",
+	tag = "bookmarks",
+	params(("id" = i64, Path, description = "Bookmark id")),
+	request_body = UpdateBookmark,
+	responses(
+		(status = 200, description = "Updated bookmark", body = Bookmark),
+		(status = 400, description = "Invalid payload", body = ApiErrorBody),
+		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
+		(status = 409, description = "A bookmark with this URL or keyword already exists", body = ApiErrorBody),
+	)
+)]
+pub async fn update_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+	Json(update): Json<UpdateBookmark>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} PUT /api/bookmarks/{id}");
+	validate_id(id)?;
+	// Partial-update contract: an empty-string URL means "clear it", which
+	// is invalid; a `None` URL means "unchanged".
+	if update.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+		return Err(AppError::invalid_url("url cannot be empty"));
+	}
+	validate_keyword(update.keyword.as_deref())?;
+
+	// Read the current row first (a reader; no writer yet) — media
+	// resolution needs it, and a missing id must 404 before any fetch.
+	let db = state.db.clone();
+	let existing = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+	let Some(existing) = existing else {
+		return Err(AppError::not_found("bookmark not found"));
+	};
+
+	// Duplicate checks and media resolution (potentially network I/O) run
+	// without the writer held; only `update_resolved` takes it, and it
+	// re-checks against the fresh row so a concurrent edit can't slip a
+	// duplicate in or persist stale media.
+	let db = state.db.clone();
+	let seen = existing.clone();
+	let update_for_check = update.clone();
+	tokio::task::spawn_blocking(move || {
+		bm_db::check_update_collisions(&db.reader(), &seen, &update_for_check)
+	})
+	.await??;
+
+	let seen = existing.clone();
+	let update_for_resolve = update.clone();
+	let media = tokio::task::spawn_blocking(move || {
+		crate::core::media::resolve_update(&seen, &update_for_resolve)
+	})
+	.await?
+	.map_err(AppError::invalid_payload)?;
+
+	let db = state.db.clone();
+	let seen = existing.clone();
+	let update_for_db = update.clone();
+	let existing = tokio::task::spawn_blocking(move || {
+		bm_db::update_resolved(&db.writer(), id, &update_for_db, &seen, media)
+	})
+	.await??;
+
+	let Some(existing) = existing else {
+		return Err(AppError::not_found("bookmark not found"));
+	};
+	state.refresh_caches().await;
+	// `describe` diffs the pre-update bookmark against the request so the
+	// change log shows exactly what moved ("title: A -> B", "starred: no ->
+	// yes").
+	let changes = update.describe(&existing);
+	let changes = if changes.is_empty() {
+		"no changes".to_string()
+	} else {
+		changes.join(", ")
+	};
+	crate::log_info!("{addr} updated bookmark #{id} ({changes})");
+
+	let db = state.db.clone();
+	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+	Ok(Json(bookmark).into_response())
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct DeleteQuery {
+	/// Permanently delete instead of moving to trash.
+	purge: Option<bool>,
+}
+
+/// Remove a bookmark. Moves it to the trash by default; `purge=true`
+/// deletes it permanently.
