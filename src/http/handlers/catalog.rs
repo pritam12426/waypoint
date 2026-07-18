@@ -105,3 +105,152 @@ pub async fn rename_category(
 }
 
 /// Delete a category. Bookmarks in it move to the default category.
+#[utoipa::path(
+	delete,
+	path = "/api/categories/{id}",
+	tag = "categories",
+	params(("id" = i64, Path, description = "Category id")),
+	responses(
+		(status = 204, description = "Category deleted"),
+		(status = 400, description = "Cannot delete default category", body = ApiErrorBody),
+		(status = 404, description = "Category not found", body = ApiErrorBody),
+	)
+)]
+pub async fn delete_category(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+	crate::log_debug!("{addr} DELETE /api/categories/{id}");
+	let id = validate_id(id)?;
+	let db = state.db.clone();
+	let db2 = db.clone();
+	let is_default =
+		tokio::task::spawn_blocking(move || cat_db::is_default(&db.reader(), id)).await??;
+	if is_default {
+		return Err(AppError::invalid_name(
+			"the default category cannot be deleted",
+		));
+	}
+	let deleted = tokio::task::spawn_blocking(move || cat_db::delete(&db2.writer(), id)).await??;
+	if deleted {
+		crate::log_info!("{addr} deleted category #{id} (bookmarks moved to default)");
+		state.refresh_caches().await;
+		Ok(StatusCode::NO_CONTENT)
+	} else {
+		Err(AppError::not_found("category not found"))
+	}
+}
+
+/// List tags with their bookmark counts.
+#[utoipa::path(
+	get,
+	path = "/api/tags",
+	tag = "tags",
+	responses((status = 200, description = "Tags with bookmark counts", body = [TagCount])),
+)]
+pub async fn list_tags(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} GET /api/tags");
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	cached_json(&state, "tags:all".to_string(), if_none_match, move |conn| {
+		tag_db::list_with_counts(conn, None, 0)
+	})
+	.await
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct RenameTag {
+	name: String,
+}
+
+/// Rename a tag. All bookmark associations move with it.
+#[utoipa::path(
+	put,
+	path = "/api/tags/{old_name}",
+	tag = "tags",
+	params(("old_name" = String, Path, description = "Current tag name")),
+	request_body = RenameTag,
+	responses(
+		(status = 200, description = "Tag renamed"),
+		(status = 400, description = "Invalid name", body = ApiErrorBody),
+		(status = 404, description = "Tag not found", body = ApiErrorBody),
+	)
+)]
+pub async fn rename_tag(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(old_name): Path<String>,
+	Json(body): Json<RenameTag>,
+) -> Result<StatusCode, AppError> {
+	crate::log_debug!("{addr} PUT /api/tags/{}", old_name);
+	if body.name.trim().is_empty() {
+		return Err(AppError::invalid_name("tag name cannot be empty"));
+	}
+	let db = state.db.clone();
+	let old = old_name.clone();
+	let new = body.name.clone();
+	let renamed =
+		tokio::task::spawn_blocking(move || tag_db::rename(&db.writer(), &old, &new)).await??;
+	if renamed {
+		crate::log_info!("{addr} renamed tag {old_name:?} -> {:?}", body.name);
+		state.refresh_caches().await;
+		Ok(StatusCode::OK)
+	} else {
+		Err(AppError::not_found("tag not found"))
+	}
+}
+
+/// Delete a tag. All bookmark-tag associations for it are removed.
+#[utoipa::path(
+	delete,
+	path = "/api/tags/{name}",
+	tag = "tags",
+	params(("name" = String, Path, description = "Tag name")),
+	responses(
+		(status = 204, description = "Tag deleted"),
+		(status = 404, description = "Tag not found", body = ApiErrorBody),
+	)
+)]
+pub async fn delete_tag(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+	crate::log_debug!("{addr} DELETE /api/tags/{}", name);
+	let db = state.db.clone();
+	let tag_name = name.clone();
+	let deleted =
+		tokio::task::spawn_blocking(move || tag_db::delete(&db.writer(), &tag_name)).await??;
+	if deleted {
+		crate::log_info!("{addr} deleted tag {name:?}");
+		state.refresh_caches().await;
+		Ok(StatusCode::NO_CONTENT)
+	} else {
+		Err(AppError::not_found("tag not found"))
+	}
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct SearchQuery {
+	/// The text to search for (matches title, description, note and URL).
+	q: Option<String>,
+	/// Narrow results to this category.
+	category: Option<String>,
+	/// Narrow results to bookmarks carrying this tag.
+	tag: Option<String>,
+	/// Narrow results to this keyword shortcut.
+	keyword: Option<String>,
+	/// Maximum number of results (1–1000, default 50).
+	limit: Option<i64>,
+	/// Search the archive index instead of the main (active) one.
+	archived: Option<bool>,
+}
+
+/// Full-text search. Hits the active index by default; `archived=true`
+/// searches the separate archive index.
