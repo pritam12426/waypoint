@@ -596,3 +596,170 @@ pub struct BulkDeleteQuery {
 /// calling this without `ids` *and* without any criterion is a 400, so a
 /// bare `DELETE /api/bookmarks` cannot silently gut the database. With
 /// `dry_run=true` the matching ids and count come back with `removed: 0`.
+#[utoipa::path(
+	delete,
+	path = "/api/bookmarks",
+	tag = "bookmarks",
+	params(BulkDeleteQuery),
+	responses(
+		(
+			status = 200,
+			description = "Bookmarks removed (or, with dry_run=true, the ids that would be removed)",
+			body = BulkRemoveResult,
+		),
+		(status = 400, description = "No ids and no criteria, or invalid parameters", body = ApiErrorBody),
+	)
+)]
+pub async fn bulk_delete_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<BulkDeleteQuery>,
+) -> Result<Json<BulkRemoveResult>, AppError> {
+	let dry_run = q.dry_run.unwrap_or(false);
+	let purge = q.purge.unwrap_or(false);
+
+	let ids: Vec<i64> = match q.ids {
+		Some(raw) => raw
+			.split(',')
+			.filter(|part| !part.is_empty())
+			.map(|part| {
+				let id = part
+					.parse::<i64>()
+					.map_err(|_| AppError::invalid_id(format!("invalid bookmark id: {part}")))?;
+				validate_id(id)
+			})
+			.collect::<Result<Vec<_>, AppError>>()?,
+		None => Vec::new(),
+	};
+
+	let has_criteria = [
+		q.category.is_some(),
+		q.category_id.is_some(),
+		q.tag.is_some(),
+		q.keyword.is_some(),
+		q.starred.is_some(),
+		q.archived.is_some(),
+		q.trash.is_some(),
+		q.created_after.is_some(),
+		q.created_before.is_some(),
+		q.updated_after.is_some(),
+		q.updated_before.is_some(),
+		q.visited_after.is_some(),
+		q.visited_before.is_some(),
+		q.trashed_after.is_some(),
+		q.trashed_before.is_some(),
+	]
+	.iter()
+	.any(|c| *c);
+
+	if ids.is_empty() && !has_criteria {
+		return Err(AppError::invalid_limit(
+			"bulk delete needs ids or at least one filter criterion \
+			 (refusing a catch-all)",
+		));
+	}
+	if !ids.is_empty() && has_criteria {
+		return Err(AppError::invalid_limit(
+			"bulk delete accepts either an ids list or filter criteria, not both",
+		));
+	}
+
+	let filter = if has_criteria {
+		let created_after = parse_bound(q.created_after, false)?;
+		let created_before = parse_bound(q.created_before, true)?;
+		let updated_after = parse_bound(q.updated_after, false)?;
+		let updated_before = parse_bound(q.updated_before, true)?;
+		let visited_after = parse_bound(q.visited_after, false)?;
+		let visited_before = parse_bound(q.visited_before, true)?;
+		let trashed_after = parse_bound(q.trashed_after, false)?;
+		let trashed_before = parse_bound(q.trashed_before, true)?;
+		validate_bounds(
+			(created_after.clone(), created_before.clone()),
+			(updated_after.clone(), updated_before.clone()),
+			(visited_after.clone(), visited_before.clone()),
+			(trashed_after.clone(), trashed_before.clone()),
+		)?;
+		BookmarkFilter {
+			category: q.category,
+			category_id: q.category_id,
+			tag: q.tag,
+			keyword: q.keyword,
+			starred: q.starred,
+			archived: q.archived,
+			trash: q.trash.unwrap_or(false),
+			created_after,
+			created_before,
+			updated_after,
+			updated_before,
+			last_visited_after: visited_after,
+			last_visited_before: visited_before,
+			trashed_after,
+			trashed_before,
+			limit: None,
+			offset: None,
+			before_cursor: None,
+		}
+	} else {
+		BookmarkFilter::default()
+	};
+
+	crate::log_debug!(
+		"{addr} DELETE /api/bookmarks (ids={ids:?}, criteria={has_criteria}, purge={purge}, dry_run={dry_run})"
+	);
+	let db = state.db.clone();
+	let result = match tokio::task::spawn_blocking(move || -> anyhow::Result<BulkRemoveResult> {
+		let conn = db.writer();
+		if dry_run {
+			if has_criteria {
+				// Preview mode reports the ids a real run would touch.
+				let matched = bm_db::select_ids(&conn, &filter)?;
+				Ok(BulkRemoveResult {
+					ids: matched,
+					removed: 0,
+				})
+			} else {
+				Ok(BulkRemoveResult {
+					ids: ids.clone(),
+					removed: 0,
+				})
+			}
+		} else if has_criteria {
+			Ok(bm_db::remove_matching(&conn, &filter, purge)?)
+		} else {
+			Ok(bm_db::remove_ids(&conn, &ids, purge)?)
+		}
+	})
+	.await
+	{
+		Ok(Ok(result)) => result,
+		Ok(Err(err)) => {
+			crate::log_error!("{addr} DELETE /api/bookmarks failed: {err:#}");
+			return Err(AppError::internal());
+		}
+		Err(join) => {
+			crate::log_error!("{addr} DELETE /api/bookmarks task panicked: {join}");
+			return Err(AppError::internal());
+		}
+	};
+
+	crate::log_info!(
+		"{addr} bulk delete: removed {} bookmark(s) (dry_run={dry_run})",
+		result.removed
+	);
+	if !dry_run && result.removed > 0 {
+		state.refresh_caches().await;
+	}
+	Ok(Json(result))
+}
+
+/// Apply one partial update to many bookmarks by id. All ids receive the
+/// same change; ids that don't exist or are trashed are reported in
+/// `skipped` instead of failing the request.
+///
+/// Media-affecting fields (`url`, `favicon`, `thumbnail`, modes, `refresh`)
+/// resolve per bookmark without holding the writer, mirroring
+/// `update_bookmark`. Validation failures caught in the pre-write pass
+/// (empty payload, duplicate URL/keyword, unresolvable media) abort before
+/// anything is written, so a bad id can't leave a half-applied batch; a
+/// collision that only materializes at write time (a concurrent edit)
+/// aborts mid-batch.
