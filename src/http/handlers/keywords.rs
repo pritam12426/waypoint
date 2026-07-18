@@ -133,3 +133,52 @@ pub async fn keyword_redirect(
 /// address-bar twin of `/keywords/{keyword}`: the frontend card titles
 /// point here so opening a bookmark from the UI counts as a visit even
 /// without a keyword shortcut.
+#[utoipa::path(
+	get,
+	path = "/open/{id}",
+	tag = "keywords",
+	security(()),
+	params(("id" = i64, Path, description = "Bookmark id")),
+	responses(
+		(status = 307, description = "Redirect to the bookmark URL"),
+		(status = 404, description = "No bookmark has this id"),
+	)
+)]
+pub async fn open_bookmark(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} GET /open/{id}");
+	let db = state.db.clone();
+	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+
+	match bookmark {
+		Some(b) => {
+			crate::log_info!("{addr} open bookmark #{id} ({url})", id = b.id, url = b.url);
+			// Best-effort visit tracking: fire and forget so a slow or
+			// failed write never delays the redirect the user is waiting on.
+			// A successful visit touches every aggregate, so invalidate both
+			// caches once it lands.
+			let db = state.db.clone();
+			let state = state.clone();
+			let id = b.id;
+			tokio::task::spawn_blocking(move || {
+				if vis_db::record(&db.writer(), id).is_ok() {
+					state.invalidate_caches();
+				}
+			});
+			Ok(Redirect::temporary(&b.url).into_response())
+		}
+		None => {
+			// A missing id is a plain 404 with a text body — this route is
+			// outside `/api` and returns text, not the JSON error contract.
+			crate::log_warn!("{addr} no bookmark with id #{id}");
+			Ok((
+				StatusCode::NOT_FOUND,
+				format!("no bookmark with id #{id}\n"),
+			)
+				.into_response())
+		}
+	}
+}
