@@ -763,3 +763,184 @@ pub async fn bulk_delete_bookmarks(
 /// anything is written, so a bad id can't leave a half-applied batch; a
 /// collision that only materializes at write time (a concurrent edit)
 /// aborts mid-batch.
+#[utoipa::path(
+	patch,
+	path = "/api/bookmarks",
+	tag = "bookmarks",
+	request_body = BulkUpdateRequest,
+	responses(
+		(
+			status = 200,
+			description = "Bulk update applied",
+			body = BulkUpdateResult,
+		),
+		(
+			status = 400,
+			description = "No ids, nothing to change, or invalid parameters",
+			body = ApiErrorBody,
+		),
+		(
+			status = 409,
+			description = "A bookmark with this URL or keyword already exists",
+			body = ApiErrorBody,
+		),
+	)
+)]
+pub async fn bulk_update_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Json(req): Json<BulkUpdateRequest>,
+) -> Result<Json<BulkUpdateResult>, AppError> {
+	crate::log_debug!("{addr} PATCH /api/bookmarks ({} ids)", req.ids.len());
+	if req.ids.is_empty() {
+		return Err(AppError::invalid_payload(
+			"bulk update needs at least one bookmark id",
+		));
+	}
+	for id in &req.ids {
+		validate_id(*id)?;
+	}
+	let update = req.update.clone();
+	// Same gates as the single-update handler, before any id is touched.
+	if !update.has_any_change() {
+		return Err(AppError::invalid_payload(
+			"bulk update has nothing to change",
+		));
+	}
+	if update.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+		return Err(AppError::invalid_url("url cannot be empty"));
+	}
+	validate_keyword(update.keyword.as_deref())?;
+
+	// Pass 1 (off the writer): read each row, duplicate-check, resolve
+	// media. Any failure here aborts before a single write, so a bad id or
+	// a duplicate in the batch can't leave earlier ids half-applied.
+	// Trashed or missing ids are collected as `skipped`, never a hard error.
+	let mut pending: Vec<(i64, Bookmark, crate::core::media::ResolvedMedia)> = Vec::new();
+	let mut skipped: Vec<i64> = Vec::new();
+	for id in req.ids {
+		let db = state.db.clone();
+		let existing = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+		let Some(existing) = existing else {
+			skipped.push(id);
+			continue;
+		};
+		let db = state.db.clone();
+		let seen = existing.clone();
+		let update_for_check = update.clone();
+		tokio::task::spawn_blocking(move || {
+			bm_db::check_update_collisions(&db.reader(), &seen, &update_for_check)
+		})
+		.await??;
+		let seen = existing.clone();
+		let update_for_resolve = update.clone();
+		let media = tokio::task::spawn_blocking(move || {
+			crate::core::media::resolve_update(&seen, &update_for_resolve)
+		})
+		.await?
+		.map_err(AppError::invalid_payload)?;
+		pending.push((id, existing, media));
+	}
+
+	// Pass 2 (writer): persist each pre-resolved update. A bookmark that
+	// vanished between the passes (concurrently trashed) is skipped.
+	let mut updated: Vec<i64> = Vec::new();
+	for (id, seen, media) in pending {
+		let db = state.db.clone();
+		let update_for_db = update.clone();
+		let result = tokio::task::spawn_blocking(move || {
+			bm_db::update_resolved(&db.writer(), id, &update_for_db, &seen, media)
+		})
+		.await??;
+		match result {
+			Some(_) => updated.push(id),
+			None => skipped.push(id),
+		}
+	}
+
+	crate::log_info!(
+		"{addr} bulk update: updated {} bookmark(s), skipped {}",
+		updated.len(),
+		skipped.len()
+	);
+	if !updated.is_empty() {
+		state.refresh_caches().await;
+	}
+	Ok(Json(BulkUpdateResult { updated, skipped }))
+}
+
+/// Permanently empty the trash. With `before`, only bookmarks trashed at or
+/// before that UTC date/time are purged. No confirmation is needed — the
+/// frontend gates the destructive call behind its own dialog. With
+/// `dry_run=true` the matching ids come back with `removed: 0`.
+#[utoipa::path(
+	delete,
+	path = "/api/trash",
+	tag = "trash",
+	params(("before" = Option<String>, Query, description = "Only purge bookmarks trashed at or before this UTC date/time")),
+	responses(
+		(
+			status = 200,
+			description = "Trashed bookmarks permanently deleted (or, with dry_run=true, the ids that would be purged)",
+			body = BulkRemoveResult,
+		),
+		(status = 400, description = "Invalid date", body = ApiErrorBody),
+	)
+)]
+pub async fn empty_trash(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<EmptyTrashQuery>,
+) -> Result<Json<BulkRemoveResult>, AppError> {
+	let before = parse_bound(q.before, true)?;
+	let dry_run = q.dry_run.unwrap_or(false);
+	crate::log_debug!("{addr} DELETE /api/trash (before={before:?}, dry_run={dry_run})");
+	let filter = BookmarkFilter {
+		trash: true,
+		trashed_before: before,
+		limit: None,
+		offset: None,
+		..Default::default()
+	};
+	let db = state.db.clone();
+	let result = match tokio::task::spawn_blocking(move || {
+		let conn = db.writer();
+		if dry_run {
+			let matched = bm_db::select_ids(&conn, &filter)?;
+			Ok::<BulkRemoveResult, anyhow::Error>(BulkRemoveResult {
+				ids: matched,
+				removed: 0,
+			})
+		} else {
+			bm_db::remove_matching(&conn, &filter, true)
+		}
+	})
+	.await
+	{
+		Ok(Ok(result)) => result,
+		Ok(Err(err)) => {
+			crate::log_error!("{addr} DELETE /api/trash failed: {err:#}");
+			return Err(AppError::internal());
+		}
+		Err(join) => {
+			crate::log_error!("{addr} DELETE /api/trash task panicked: {join}");
+			return Err(AppError::internal());
+		}
+	};
+	crate::log_info!(
+		"{addr} trash emptied: permanently deleted {} bookmark(s) (dry_run={dry_run})",
+		result.removed
+	);
+	if !dry_run && result.removed > 0 {
+		state.refresh_caches().await;
+	}
+	Ok(Json(result))
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct EmptyTrashQuery {
+	/// Only purge bookmarks trashed at or before this UTC date/time.
+	before: Option<String>,
+	/// Report the matching ids/count without changing anything.
+	dry_run: Option<bool>,
+}
