@@ -254,3 +254,81 @@ pub struct SearchQuery {
 
 /// Full-text search. Hits the active index by default; `archived=true`
 /// searches the separate archive index.
+#[utoipa::path(
+	get,
+	path = "/api/search",
+	tag = "search",
+	params(SearchQuery),
+	responses(
+		(
+			status = 200,
+			description = "Search results (active index, or archive index when `archived=true`)",
+			body = [Bookmark],
+			headers(("x-total-count" = i64, description = "Total matching bookmarks")),
+		),
+		(status = 400, description = "Missing or invalid query", body = ApiErrorBody),
+	)
+)]
+pub async fn search_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<SearchQuery>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	// A missing/blank `q` is a 400, never a "search everything".
+	let query = q.q.as_deref().map(str::trim).unwrap_or("");
+	if query.is_empty() {
+		return Err(AppError::query_required(
+			"q is required (the text to search for)",
+		));
+	}
+	let limit = validate_stats_limit(q.limit, 50)?;
+	let archived = q.archived.unwrap_or(false);
+	let filter = BookmarkFilter {
+		category: q.category,
+		tag: q.tag,
+		keyword: q.keyword,
+		..Default::default()
+	};
+	let query = query.to_string();
+	crate::log_debug!(
+		"{addr} GET /api/search?q={}{}",
+		query,
+		if archived { "&archived=true" } else { "" }
+	);
+	let db = state.db.clone();
+	let query_for_db = query.clone();
+	// Same pattern as list: results + exact total in one spawn_blocking,
+	// `count_search` reading the same index as the search itself.
+	let (bookmarks, total) = tokio::task::spawn_blocking(move || {
+		let conn = db.reader();
+		let list = if archived {
+			bm_db::search_archived(&conn, &query_for_db, limit, &filter)?
+		} else {
+			bm_db::search(&conn, &query_for_db, limit, &filter)?
+		};
+		let total = bm_db::count_search(&conn, &query_for_db, archived, &filter)?;
+		Ok::<_, anyhow::Error>((list, total))
+	})
+	.await??;
+	crate::log_debug!(
+		"{addr} search for \"{query}\"{} returned {} of {} results",
+		if archived { " (archive)" } else { "" },
+		bookmarks.len(),
+		total
+	);
+	// Same revalidation semantics as the list: strong ETag + must-revalidate,
+	// so a client that already has these exact results gets a cheap 304.
+	let etag = list_etag(total, &bookmarks);
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	let mut response_headers = HeaderMap::new();
+	response_headers.insert(X_TOTAL_COUNT, total.to_string().parse().unwrap());
+	response_headers.insert(header::CACHE_CONTROL, "private, no-cache".parse().unwrap());
+	response_headers.insert(header::ETAG, etag.parse().unwrap());
+	if if_none_match == Some(etag.as_str()) {
+		return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
+	}
+	Ok((response_headers, Json(bookmarks)).into_response())
+}
