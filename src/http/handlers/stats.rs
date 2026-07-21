@@ -183,3 +183,107 @@ pub async fn stats_top_visited(
 }
 
 /// Bookmarks that have never been visited via a keyword shortcut.
+#[utoipa::path(
+	get,
+	path = "/api/stats/never-visited",
+	tag = "stats",
+	params(StatsQuery),
+	responses((status = 200, description = "Never-visited bookmarks", body = [NeverVisitedBookmark])),
+)]
+pub async fn stats_never_visited(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<StatsQuery>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	let limit = validate_stats_limit(q.limit, 50)?;
+	let offset = validate_offset(q.offset)?;
+	crate::log_debug!("{addr} GET /api/stats/never-visited?limit={limit}&offset={offset}");
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	cached_json(
+		&state,
+		stats_key("never-visited", limit, offset),
+		if_none_match,
+		move |conn| vis_db::never_visited(conn, limit as usize, offset as usize),
+	)
+	.await
+}
+
+/// Tags that are applied to only one bookmark.
+#[utoipa::path(
+	get,
+	path = "/api/stats/orphan-tags",
+	tag = "stats",
+	params(StatsQuery),
+	responses((status = 200, description = "Orphan tags (used on only 1 bookmark)", body = [OrphanTag])),
+)]
+pub async fn stats_orphan_tags(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<StatsQuery>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	let limit = validate_stats_limit(q.limit, 50)?;
+	let offset = validate_offset(q.offset)?;
+	crate::log_debug!("{addr} GET /api/stats/orphan-tags?limit={limit}&offset={offset}");
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	cached_json(
+		&state,
+		stats_key("orphan-tags", limit, offset),
+		if_none_match,
+		move |conn| tag_db::orphan_tags(conn, limit as usize, offset as usize),
+	)
+	.await
+}
+
+/// How many bookmarks are missing tags, notes, or descriptions.
+#[utoipa::path(
+	get,
+	path = "/api/stats/hygiene",
+	tag = "stats",
+	responses((status = 200, description = "Bookmark hygiene stats", body = HygieneStats)),
+)]
+pub async fn stats_hygiene(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} GET /api/stats/hygiene");
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	cached_json(&state, "hygiene".to_string(), if_none_match, st_db::hygiene).await
+}
+
+/// Bookmarks added per month over the last 12 months.
+#[utoipa::path(
+	get,
+	path = "/api/stats/activity",
+	tag = "stats",
+	params(StatsQuery),
+	responses((status = 200, description = "Monthly activity trend", body = [MonthlyActivity])),
+)]
+pub async fn stats_activity(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<StatsQuery>,
+	headers: HeaderMap,
+) -> Result<Response, AppError> {
+	let limit = validate_stats_limit(q.limit, 12)?;
+	let offset = validate_offset(q.offset)?;
+	crate::log_debug!("{addr} GET /api/stats/activity?limit={limit}&offset={offset}");
+	let if_none_match = headers
+		.get(header::IF_NONE_MATCH)
+		.and_then(|v| v.to_str().ok());
+	cached_json(
+		&state,
+		stats_key("activity", limit, offset),
+		if_none_match,
+		move |conn| st_db::monthly_activity(conn, limit as usize, offset as usize),
+	)
+	.await
+}
