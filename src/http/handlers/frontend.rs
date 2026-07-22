@@ -87,3 +87,113 @@ fn sanitize_static_path(path: &str) -> Option<String> {
 /// Reads one frontend asset from the embedded copy. Unknown paths fall
 /// back to `index.html` so client-side routing always boots the SPA, and
 /// a genuinely missing file (also missing index) becomes a 404.
+async fn serve_asset(path: &str) -> Response {
+	// A traversal attempt (`..`, a `\` component, or their percent-encoded
+	// forms) is refused outright — it must never fall through to `index.html`
+	// or reach a directory join.
+	let Some(path) = sanitize_static_path(path) else {
+		crate::log_warn!("static path traversal attempt refused: {path:?}");
+		return (StatusCode::NOT_FOUND, "not found").into_response();
+	};
+
+	// Embedded copy: rust-embed keeps the data as `'static`
+	// borrowed bytes when possible, which avoids a copy; owned data is only
+	// produced for generated files. `Body::from_static` needs a `&'static
+	// [u8]`, hence the borrow/owned split.
+	match Assets::get(&path) {
+		Some(file) => {
+			crate::log_trace!("static: served {path:?} (embedded)");
+			let mime = mime_guess::from_path(path).first_or_octet_stream();
+			let data = match file.data {
+				Cow::Borrowed(b) => b,
+				Cow::Owned(v) => return raw_response(StatusCode::OK, mime.as_ref(), Body::from(v)),
+			};
+			raw_response(
+				StatusCode::OK,
+				mime.as_ref(),
+				Body::from(Bytes::from_static(data)),
+			)
+		}
+		None => match Assets::get("index.html") {
+			Some(file) => {
+				crate::log_trace!(
+					"static: {path:?} missing, served fallback index.html (embedded)"
+				);
+				let data = match file.data {
+					Cow::Borrowed(b) => b,
+					Cow::Owned(v) => {
+						return raw_response(StatusCode::OK, "text/html", Body::from(v));
+					}
+				};
+				raw_response(
+					StatusCode::OK,
+					"text/html",
+					Body::from(Bytes::from_static(data)),
+				)
+			}
+			None => {
+				crate::log_trace!("static: {path:?} not found (no embedded index.html)");
+				(StatusCode::NOT_FOUND, "not found").into_response()
+			}
+		},
+	}
+}
+
+fn raw_response(status: StatusCode, mime: &str, body: Body) -> Response {
+	Response::builder()
+		.status(status)
+		.header(header::CONTENT_TYPE, mime)
+		.body(body)
+		.expect("static response headers are always valid")
+		.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::sanitize_static_path;
+
+	#[test]
+	fn static_path_keeps_clean_assets() {
+		assert_eq!(
+			sanitize_static_path("index.html").as_deref(),
+			Some("index.html")
+		);
+		assert_eq!(
+			sanitize_static_path("assets/app-abc123.js").as_deref(),
+			Some("assets/app-abc123.js")
+		);
+	}
+
+	// Traversal vectors — literal, percent-encoded, and mixed — all refuse.
+	#[test]
+	fn static_path_rejects_traversal() {
+		for path in [
+			"../secret",
+			"..",
+			"a/../../secret",
+			"..%2fsecret",
+			"%2e%2e/secret",
+			"a/%2e%2e/secret",
+			"..\\secret",
+			"a\\..\\secret",
+			"%2e%2e%5csecret",
+			"index.html/../secret",
+		] {
+			assert_eq!(
+				sanitize_static_path(path),
+				None,
+				"{path:?} should be refused"
+			);
+		}
+	}
+
+	// A leading `/` on the raw path is handled by the caller; the sanitizer
+	// itself just skips the empty leading component.
+	#[test]
+	fn static_path_handles_leading_slash() {
+		assert_eq!(
+			sanitize_static_path("assets/logo.png").as_deref(),
+			Some("assets/logo.png")
+		);
+	}
+}
