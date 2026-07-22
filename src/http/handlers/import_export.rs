@@ -102,3 +102,47 @@ pub struct ExportQuery {
 
 /// Exports every active bookmark as Markdown or CSV. Only *active*
 /// bookmarks are exported — trashed and archived content stays out.
+#[utoipa::path(
+	get,
+	path = "/api/export",
+	tag = "bookmarks",
+	params(("format" = Option<String>, Query, description = "md (default) or csv")),
+	responses(
+		(
+			status = 200,
+			description = "Exported document as raw text (text/markdown or text/csv)",
+			body = String,
+		),
+		(status = 400, description = "Unsupported format", body = ApiErrorBody),
+	)
+)]
+pub async fn export_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<ExportQuery>,
+) -> Result<Response, AppError> {
+	let format = match q.format.as_deref().unwrap_or("md") {
+		"md" | "markdown" => "md",
+		"csv" => "csv",
+		other => {
+			return Err(AppError::invalid_payload(format!(
+				"unsupported export format {other:?}: use md or csv"
+			)));
+		}
+	};
+	crate::log_debug!("{addr} GET /api/export (format={format})");
+	let db = state.db.clone();
+	let content = tokio::task::spawn_blocking(move || {
+		let conn = db.reader();
+		match format {
+			"md" => import_export::export_markdown(&conn),
+			_ => import_export::export_csv(&conn),
+		}
+	})
+	.await??;
+	let (mime, body) = match format {
+		"md" => ("text/markdown; charset=utf-8", content),
+		_ => ("text/csv; charset=utf-8", content),
+	};
+	Ok(([(header::CONTENT_TYPE, mime)], body).into_response())
+}
