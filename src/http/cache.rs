@@ -155,3 +155,110 @@ pub struct StatsCache {
 	ttl: Duration,
 }
 
+impl StatsCache {
+	pub fn new() -> Self {
+		Self {
+			inner: Mutex::new(HashMap::new()),
+			ttl: Duration::from_secs(30),
+		}
+	}
+
+	/// Returns a clone of the cached body if present and younger than the
+	/// TTL (cloned so the lock drops before the body is served).
+	pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+		let hit = {
+			let inner = self.inner.lock().unwrap();
+			match inner.get(key) {
+				Some(entry) if entry.at.elapsed() < self.ttl => Some(entry.body.clone()),
+				_ => None,
+			}
+		};
+		crate::log_trace!(
+			"stats cache {} for {key:?}{}",
+			if hit.is_some() { "hit" } else { "miss" },
+			match &hit {
+				Some(body) => format!(" ({} bytes)", body.len()),
+				None => String::new(),
+			}
+		);
+		hit
+	}
+
+	/// Stores a pre-serialized body together with the closure that recomputes
+	/// it, so `refresh` can update the entry in place after a write.
+	pub fn put(&self, key: &str, body: Vec<u8>, refresh: StatsRefresher) {
+		crate::log_trace!("stats cache stored ({} bytes) for {key:?}", body.len());
+		self.inner.lock().unwrap().insert(
+			key.to_owned(),
+			StatsEntry {
+				at: Instant::now(),
+				body,
+				refresh,
+			},
+		);
+	}
+
+	/// Recompute every cached body in place against `conn` and reset its TTL
+	/// (see `CountCache::refresh` for the rationale and locking behavior).
+	pub fn refresh(&self, conn: &Connection) {
+		let refreshers: Vec<(String, StatsRefresher)> = {
+			let inner = self.inner.lock().unwrap();
+			inner
+				.iter()
+				.map(|(k, e)| (k.clone(), e.refresh.clone()))
+				.collect()
+		};
+		let n = refreshers.len();
+		for (key, refresh) in refreshers {
+			match refresh(conn) {
+				Ok(body) => {
+					let mut inner = self.inner.lock().unwrap();
+					if let Some(entry) = inner.get_mut(&key) {
+						entry.at = Instant::now();
+						entry.body = body;
+					}
+				}
+				Err(err) => {
+					crate::log_debug!(
+						"stats cache refresh failed for {key:?}: {err:#} — dropping entry"
+					);
+					self.inner.lock().unwrap().remove(&key);
+				}
+			}
+		}
+		crate::log_trace!("stats cache refreshed ({n} entries)");
+	}
+
+	pub fn invalidate(&self) {
+		let dropped = self.inner.lock().unwrap().len();
+		self.inner.lock().unwrap().clear();
+		crate::log_trace!("stats cache invalidated ({dropped} entries dropped)");
+	}
+}
+
+impl Default for StatsCache {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A helper refresh that always answers `value`.
+	fn fixed(value: i64) -> CountRefresher {
+		Arc::new(move |_: &Connection| Ok(value))
+	}
+
+	#[test]
+	fn count_cache_get_obeys_ttl() {
+		let cache = CountCache::new();
+		assert_eq!(cache.get("k"), None);
+		cache.put("k", 7, fixed(7));
+		assert_eq!(cache.get("k"), Some(7));
+		cache.invalidate();
+		assert_eq!(cache.get("k"), None);
+	}
+
+	#[test]
