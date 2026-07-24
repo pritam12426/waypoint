@@ -262,3 +262,40 @@ mod tests {
 	}
 
 	#[test]
+	fn count_cache_refresh_updates_value_and_stays_warm() {
+		let cache = CountCache::new();
+		cache.put("k", 1, Arc::new(|_: &Connection| Ok(2)));
+		// `refresh` needs a live handle even when the refresher ignores it.
+		let conn = Connection::open_in_memory().unwrap();
+		cache.refresh(&conn);
+		assert_eq!(cache.get("k"), Some(2));
+	}
+
+	#[test]
+	fn count_cache_refresh_drops_failing_entries() {
+		let cache = CountCache::new();
+		cache.put("good", 1, fixed(1));
+		cache.put(
+			"bad",
+			2,
+			Arc::new(|_: &Connection| anyhow::bail!("query failed")),
+		);
+		let conn = Connection::open_in_memory().unwrap();
+		cache.refresh(&conn);
+		assert_eq!(cache.get("good"), Some(1));
+		assert_eq!(cache.get("bad"), None);
+	}
+
+	#[test]
+	fn stats_cache_refresh_updates_body() {
+		let cache = StatsCache::new();
+		cache.put(
+			"hygiene",
+			b"old".to_vec(),
+			Arc::new(|_: &Connection| Ok(b"new".to_vec())),
+		);
+		let conn = Connection::open_in_memory().unwrap();
+		cache.refresh(&conn);
+		assert_eq!(cache.get("hygiene"), Some(b"new".to_vec()));
+	}
+}
