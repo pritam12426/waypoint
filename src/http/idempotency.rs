@@ -104,3 +104,89 @@ impl IdempotencyStore {
 /// Stable fingerprint of what the request means: method + path + body. Two
 /// requests with the same key must have the same fingerprint to share an
 /// idempotent replay.
+fn request_hash(method: &str, path: &str, body: &[u8]) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	method.hash(&mut hasher);
+	path.hash(&mut hasher);
+	body.hash(&mut hasher);
+	hasher.finish()
+}
+
+/// The middleware: active only when the request carries an `Idempotency-Key`
+/// header on a mutating method (POST/PATCH/DELETE). GET/HEAD requests pass
+/// through untouched even with a header — idempotency only makes sense for
+/// requests that *change* state.
+pub async fn idempotency(State(state): State<AppState>, req: Request, next: Next) -> Response {
+	let Some(key) = req
+		.headers()
+		.get("idempotency-key")
+		.and_then(|v| v.to_str().ok())
+		.map(str::trim)
+		.filter(|k| !k.is_empty())
+		.map(str::to_owned)
+	else {
+		return next.run(req).await;
+	};
+	if !matches!(
+		req.method(),
+		&axum::http::Method::POST | &axum::http::Method::PATCH | &axum::http::Method::DELETE
+	) {
+		return next.run(req).await;
+	}
+	if key.len() > MAX_KEY_LEN {
+		let err = AppError::invalid_payload(format!(
+			"idempotency-key must be at most {MAX_KEY_LEN} characters"
+		));
+		return err.into_response();
+	}
+
+	// Buffer the body so it can be hashed *and* passed to the handler.
+	let (parts, body) = req.into_parts();
+	let body_bytes = match to_bytes(body, 8 * 1024 * 1024).await {
+		Ok(bytes) => bytes,
+		Err(err) => {
+			let app_err = AppError::new(
+				crate::http::error::ErrorCode::InvalidPayload,
+				format!("could not read request body: {err}"),
+			);
+			return app_err.into_response();
+		}
+	};
+	let hash = request_hash(parts.method.as_str(), parts.uri.path(), &body_bytes);
+
+	// A replayed request with a matching fingerprint returns the stored
+	// response; a mismatched fingerprint is an abuse of the key.
+	if let Some(entry) = state.idempotency.get(&key) {
+		if entry.request_hash == hash {
+			crate::log_trace!("idempotency: replaying stored response for key {key:?}");
+			// Every stored response is the JSON body of a mutating endpoint;
+			// the original Content-Type is re-applied so the replay parses
+			// exactly like the first response.
+			let replay = Response::builder()
+				.status(entry.status)
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(Body::from(entry.body))
+				.unwrap();
+			return replay;
+		}
+		crate::log_warn!("idempotency: key {key:?} reused for a different request");
+		let err = AppError::replay_conflict(format!(
+			"idempotency-key {key:?} was already used for a different request"
+		));
+		return err.into_response();
+	}
+
+	let request = Request::from_parts(parts, Body::from(body_bytes));
+	let response = next.run(request).await;
+
+	// Remember the outcome so a retry replays it — including error statuses
+	// (a duplicate-URL 409 is exactly the response a retry should get).
+	let status = response.status();
+	let (resp_parts, resp_body) = response.into_parts();
+	let body = match to_bytes(resp_body, 8 * 1024 * 1024).await {
+		Ok(bytes) => bytes.to_vec(),
+		Err(_) => Vec::new(),
+	};
+	state.idempotency.put(&key, hash, status, body.clone());
+	Response::from_parts(resp_parts, Body::from(body))
+}
