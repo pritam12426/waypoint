@@ -83,3 +83,93 @@ const DOCS_UI_HTML: &str = r##"<!DOCTYPE html>
 /// of this document — they are operational and browser-facing surfaces,
 /// not API endpoints.
 #[derive(OpenApi)]
+#[openapi(
+	paths(
+		list_bookmarks,
+		create_bookmark,
+		get_bookmark,
+		update_bookmark,
+		delete_bookmark,
+		bulk_delete_bookmarks,
+		bulk_update_bookmarks,
+		restore_bookmark,
+		empty_trash,
+		list_categories,
+		rename_category,
+		delete_category,
+		list_tags,
+		rename_tag,
+		delete_tag,
+		search_bookmarks,
+		stats_overview,
+		domain_stats,
+		stats_tags,
+		stats_bookmark_detail,
+		stats_top_visited,
+		stats_never_visited,
+		stats_orphan_tags,
+		stats_hygiene,
+		stats_activity,
+		import_bookmarks,
+		export_bookmarks,
+		start_check,
+		check_status,
+		check_one_bookmark,
+		sign_in,
+		sign_out,
+		auth_status,
+		admin_backup,
+	),
+	components(schemas(
+		Bookmark,
+		NewBookmark,
+		UpdateBookmark,
+		Category,
+		TagCount,
+		DomainCount,
+		CategoryCount,
+		BookmarkVisitStats,
+		StatsOverview,
+		DomainVisitStats,
+		NeverVisitedBookmark,
+		OrphanTag,
+		HygieneStats,
+		MonthlyActivity,
+		ApiErrorBody,
+		BulkRemoveResult,
+		BulkUpdateRequest,
+		BulkUpdateResult,
+		SignInRequest,
+		SignInResponse,
+		AuthStatus,
+	)),
+	security(("bearer_auth" = [])),
+	tags(
+		(name = "bookmarks", description = "Bookmark CRUD and lifecycle"),
+		(name = "categories", description = "Category listing"),
+		(name = "tags", description = "Tag listing"),
+		(name = "trash", description = "Recycle bin operations"),
+		(name = "search", description = "Full-text search"),
+		(name = "stats", description = "Aggregate statistics"),
+		(name = "auth", description = "Session sign-in/out and status"),
+		(name = "admin", description = "Operator endpoints (backup)"),
+	),
+	modifiers(&SecurityAddon),
+)]
+pub struct ApiDoc;
+
+/// Declares the optional bearer-token security scheme. It's optional in the
+/// docs because the token only exists when the operator passes `--api-token`;
+/// unauthenticated servers still honor the same OpenAPI document.
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+	fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+		if let Some(components) = openapi.components.as_mut() {
+			components.add_security_scheme(
+				"bearer_auth",
+				SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+			);
+		}
+	}
+}
