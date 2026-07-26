@@ -106,3 +106,51 @@ impl CheckJob {
 }
 
 /// The registry itself: id assignment, lookup, and TTL reaping.
+#[derive(Default)]
+pub struct Jobs {
+	next_id: AtomicU64,
+	jobs: Mutex<HashMap<JobId, CheckJob>>,
+}
+
+impl Jobs {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Registers a fresh running job and returns its id.
+	pub fn start(&self) -> (JobId, CheckJob) {
+		let job = CheckJob::new();
+		let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+		self.jobs.lock().unwrap().insert(id, job.clone());
+		(id, job)
+	}
+
+	/// Looks up a job, reaping anything finished past its TTL first so a
+	/// poll doesn't return a long-dead handle.
+	pub fn get(&self, id: JobId) -> Option<CheckJob> {
+		let mut jobs = self.jobs.lock().unwrap();
+		self.reap_locked(&mut jobs, SystemTime::now());
+		jobs.get(&id).cloned()
+	}
+
+	/// Drops finished jobs older than `JOB_TTL`. Cheap enough to run on
+	/// every poll; also called after a job finishes to keep the map small.
+	pub fn reap(&self) {
+		let mut jobs = self.jobs.lock().unwrap();
+		self.reap_locked(&mut jobs, SystemTime::now());
+	}
+
+	fn reap_locked(&self, jobs: &mut HashMap<JobId, CheckJob>, now: SystemTime) {
+		jobs.retain(|_, job| {
+			let Ok(state) = job.state.lock() else {
+				return true;
+			};
+			match &*state {
+				CheckJobState::Running { .. } => true,
+				CheckJobState::Finished { finished_at, .. } => {
+					now.duration_since(*finished_at).unwrap_or(Duration::ZERO) < JOB_TTL
+				}
+			}
+		});
+	}
+}
