@@ -82,3 +82,80 @@ impl Default for Metrics {
 	}
 }
 
+impl Metrics {
+	pub fn new() -> Self {
+		Self {
+			started: Instant::now(),
+			..Default::default()
+		}
+	}
+
+	/// Records one completed request: increments the in-flight gauge around
+	/// the handler and appends to the counter/histogram afterwards. Call it
+	/// from the outer logging middleware, which wraps every route.
+	pub fn observe(&self, method: &str, path: &str, status: u16, elapsed: std::time::Duration) {
+		self.in_flight.fetch_add(1, Ordering::Relaxed);
+		let label_path = sanitize_path(path);
+		let secs = elapsed.as_secs_f64();
+
+		{
+			let mut reqs = self.requests.lock().unwrap();
+			*reqs
+				.entry((method.to_owned(), label_path.clone(), status))
+				.or_insert(0) += 1;
+		}
+		{
+			let mut dur = self.durations.lock().unwrap();
+			let key = (method.to_owned(), label_path.clone());
+			// Cardinality guard: once the distinct (method, path) series
+			// reach the cap, a *new* path is not added as a histogram series
+			// (the request counter above still counts it). Unbounded
+			// cardinality is the one thing that makes Prometheus fall over.
+			if dur.len() < MAX_SERIES || dur.contains_key(&key) {
+				let buckets = dur
+					.entry(key.clone())
+					.or_insert_with(|| vec![0; BUCKETS.len()]);
+				for (i, bound) in BUCKETS.iter().enumerate() {
+					if secs <= *bound {
+						buckets[i] += 1;
+					}
+				}
+				*self.duration_sum.lock().unwrap().entry(key).or_insert(0.0) += secs;
+			}
+		}
+		self.in_flight.fetch_sub(1, Ordering::Relaxed);
+	}
+
+	/// Renders everything in Prometheus text format. `db` supplies the
+	/// SQLite pool gauges (writer lock + readers in use) so a scrape tells
+	/// an operator about read/write saturation without a second probe.
+	pub fn render(&self, db: &crate::database::Db) -> String {
+		use std::fmt::Write;
+		let mut out = String::with_capacity(4096);
+
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_uptime_seconds Seconds since the server started."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_uptime_seconds gauge");
+		let _ = writeln!(
+			out,
+			"waypointd_uptime_seconds {}",
+			self.started.elapsed().as_secs_f64()
+		);
+		let _ = writeln!(out);
+
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_http_requests_total Total HTTP requests handled."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_http_requests_total counter");
+		let reqs = self.requests.lock().unwrap();
+		let mut keys: Vec<_> = reqs.keys().collect();
+		keys.sort();
+		for (method, path, status) in keys {
+			let _ = writeln!(
+				out,
+				"waypointd_http_requests_total{{method=\"{method}\",path=\"{path}\",status=\"{status}\"}} {}",
+				reqs.get(&(method.clone(), path.clone(), *status))
+					.unwrap_or(&0)
