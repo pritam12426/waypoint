@@ -159,3 +159,94 @@ impl Metrics {
 				"waypointd_http_requests_total{{method=\"{method}\",path=\"{path}\",status=\"{status}\"}} {}",
 				reqs.get(&(method.clone(), path.clone(), *status))
 					.unwrap_or(&0)
+			);
+		}
+		let _ = writeln!(out);
+
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_http_request_duration_seconds HTTP request latency distribution."
+		);
+		let _ = writeln!(
+			out,
+			"# TYPE waypointd_http_request_duration_seconds histogram"
+		);
+		let dur = self.durations.lock().unwrap();
+		let sums = self.duration_sum.lock().unwrap();
+		let mut dkeys: Vec<_> = dur.keys().collect();
+		dkeys.sort();
+		for (method, path) in dkeys {
+			let buckets = dur.get(&(method.clone(), path.clone())).unwrap();
+			for (i, bound) in BUCKETS.iter().enumerate() {
+				let _ = writeln!(
+					out,
+					"waypointd_http_request_duration_seconds_bucket{{method=\"{method}\",path=\"{path}\",le=\"{bound}\"}} {}",
+					buckets[i]
+				);
+			}
+			let _ = writeln!(
+				out,
+				"waypointd_http_request_duration_seconds_bucket{{method=\"{method}\",path=\"{path}\",le=\"+Inf\"}} {}",
+				buckets.iter().sum::<u64>()
+			);
+			let _ = writeln!(
+				out,
+				"waypointd_http_request_duration_seconds_sum{{method=\"{method}\",path=\"{path}\"}} {}",
+				sums.get(&(method.clone(), path.clone())).unwrap_or(&0.0)
+			);
+			let _ = writeln!(
+				out,
+				"waypointd_http_request_duration_seconds_count{{method=\"{method}\",path=\"{path}\"}} {}",
+				buckets.iter().sum::<u64>()
+			);
+		}
+		let _ = writeln!(out);
+
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_http_in_flight Requests currently being handled."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_http_in_flight gauge");
+		let _ = writeln!(
+			out,
+			"waypointd_http_in_flight {}",
+			self.in_flight.load(Ordering::Relaxed)
+		);
+		let _ = writeln!(out);
+
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_writer_locked Writer connection held by a task (1) or idle (0)."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_writer_locked gauge");
+		let _ = writeln!(
+			out,
+			"waypointd_db_writer_locked {}",
+			u8::from(db.writer_locked())
+		);
+		let _ = writeln!(out);
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_readers_in_use Pooled reader connections currently held."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_readers_in_use gauge");
+		let _ = writeln!(out, "waypointd_db_readers_in_use {}", db.readers_in_use());
+
+		out
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn sanitize_collapses_ids() {
+		assert_eq!(sanitize_path("/api/bookmarks/42"), "/api/bookmarks/{id}");
+		assert_eq!(sanitize_path("/api/bookmarks"), "/api/bookmarks");
+		assert_eq!(sanitize_path("/keywords/7"), "/keywords/{id}");
+		assert_eq!(sanitize_path("/"), "/");
+		// Only *digit-only* segments collapse — a real slug is untouched.
+		assert_eq!(sanitize_path("/api/tags/rust-lang"), "/api/tags/rust-lang");
+	}
+}
