@@ -349,3 +349,107 @@ pub struct SourceLoc {
 
 /// Core logging function: formats and writes a log message. Called by the
 /// `log_*!` macros — prefer those over calling this directly.
+#[doc(hidden)]
+pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: &str) {
+	let mut state = logger().lock().unwrap();
+
+	if state.stream.is_none() {
+		let _ = write!(
+			io::stderr(),
+			"{}[logging] error: log_init() not called — dropping message{}",
+			color::BOLD_RED,
+			color::RESET
+		);
+		if new_line {
+			let _ = writeln!(io::stderr());
+		}
+		return;
+	}
+
+	if (level as i32) > (state.level as i32) {
+		return;
+	}
+
+	// The correlation context of the request currently being handled on
+	// this task, if any. `try_with` so logging from `spawn_blocking` threads
+	// (which do not inherit task-locals) or outside any task stays silent
+	// about it instead of panicking.
+	let request = CURRENT_REQUEST.try_with(|ctx| ctx.clone()).ok();
+
+	let use_color = state.use_color;
+	let format = state.format;
+	let stream = state.stream.as_mut().unwrap();
+
+	match format {
+		LogFormat::Json => {
+			let mut obj = serde_json::json!({
+				"level": level_label_json(level),
+				"msg": msg,
+			});
+			#[cfg(feature = "show_time_stamp")]
+			{
+				obj["ts"] = serde_json::json!(timestamp_str());
+			}
+			if let Some(l) = &loc {
+				obj["file"] = serde_json::json!(l.file);
+				obj["line"] = serde_json::json!(l.line);
+				obj["func"] = serde_json::json!(l.func);
+			}
+			if let Some(ctx) = &request {
+				obj["req_id"] = serde_json::json!(ctx.req_id);
+				obj["method"] = serde_json::json!(ctx.method);
+				obj["path"] = serde_json::json!(ctx.path);
+			}
+			let _ = write!(stream, "{}", obj);
+			if new_line {
+				let _ = writeln!(stream);
+			}
+		}
+		LogFormat::Pretty => {
+			#[cfg(feature = "show_time_stamp")]
+			let _ = write_time_stamp(stream, use_color);
+
+			let _ = if use_color {
+				write_color_label(stream, level)
+			} else {
+				write!(stream, "{}", level_label_plain(level))
+			};
+
+			if let Some(ctx) = &request {
+				let _ = write_request_ctx(stream, ctx);
+			}
+
+			#[cfg(all(feature = "show_source_location", debug_assertions))]
+			if let Some(l) = &loc {
+				let (pre, post) = if use_color {
+					(color::DIM, color::RESET)
+				} else {
+					("", "")
+				};
+				let _ = write!(stream, "{}[{}:{}:{}]{} ", pre, l.file, l.line, l.func, post);
+			}
+			#[cfg(not(all(feature = "show_source_location", debug_assertions)))]
+			let _ = &loc;
+
+			let _ = write!(stream, "{}", msg);
+			if new_line {
+				let _ = writeln!(stream);
+			}
+		}
+	}
+	let _ = stream.flush();
+}
+
+/// Truncates a `Display`-able value for safe inclusion in a log line — a
+/// request body or bookmark note can be arbitrarily large, and logging it
+/// in full would both bloat the logs and make single-line JSON
+/// grep-ability worse. Full detail is still available at `debug`/`trace`
+/// level via callers that choose to bypass this.
+pub fn truncate_for_log(s: &str, max_chars: usize) -> String {
+	if s.chars().count() <= max_chars {
+		s.to_string()
+	} else {
+		let head: String = s.chars().take(max_chars).collect();
+		format!("{head}… ({} chars total)", s.chars().count())
+	}
+}
