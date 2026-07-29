@@ -197,3 +197,116 @@ tokio::task_local! {
 	/// task. Read with `try_with` (never `with`) everywhere: logging from a
 	/// `spawn_blocking` thread, or from outside any task, must degrade to
 	/// "no context" instead of panicking.
+	static CURRENT_REQUEST: RequestCtx;
+}
+
+/// Runs `f` with `ctx` as the current request's correlation context. Every
+/// `log_*!` line emitted by `f` — including through `.await` points, since
+/// tokio restores task-locals on every poll — carries the request's
+/// `req_id`/`method`/`path`.
+pub async fn with_request<F>(ctx: RequestCtx, f: F) -> F::Output
+where
+	F: std::future::Future,
+{
+	CURRENT_REQUEST.scope(ctx, f).await
+}
+
+// ── Public API ───────────────────────────────────────────────────────────
+
+/// Initialise the logger. Thread-safe; may be called multiple times.
+///
+/// `WAYPOINTD_LOG_LEVEL` in the environment (values: off/fatal/error/warn/
+/// info/debug/trace) takes precedence over `level` when set and valid, as
+/// do `WAYPOINTD_LOG_FORMAT` (`human-readable`/`json`) over `format` and
+/// `WAYPOINTD_LOG_FILE` over `file_path` — this lets an operator bump
+/// verbosity for one run without changing how the process is invoked.
+pub fn log_init(file_path: Option<&str>, level: LogLevel, format: LogFormat) {
+	let level = std::env::var("WAYPOINTD_LOG_LEVEL")
+		.ok()
+		.and_then(|v| LogLevel::from_env_str(&v))
+		.unwrap_or(level);
+	let format = std::env::var("WAYPOINTD_LOG_FORMAT")
+		.ok()
+		.and_then(|v| LogFormat::from_env_str(&v))
+		.unwrap_or(format);
+	let file_path = std::env::var("WAYPOINTD_LOG_FILE")
+		.ok()
+		.filter(|p| !p.is_empty())
+		.or_else(|| file_path.map(str::to_owned));
+
+	let (stream, use_color) = match file_path {
+		None => (Output::Stderr, io::stderr().is_terminal()),
+		Some(path) => match std::fs::OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(&path)
+		{
+			Ok(f) => (Output::File(f), false),
+			Err(err) => {
+				eprintln!(
+					"[logging] warning: could not open log file '{path}' ({err}); falling back to stderr"
+				);
+				(Output::Stderr, io::stderr().is_terminal())
+			}
+		},
+	};
+
+	let mut state = logger().lock().unwrap();
+	state.stream = Some(stream);
+	state.use_color = use_color;
+	state.level = level;
+	state.format = format;
+}
+
+pub fn log_set_level(level: LogLevel) {
+	logger().lock().unwrap().level = level;
+}
+
+pub fn log_get_level() -> LogLevel {
+	logger().lock().unwrap().level
+}
+
+pub fn log_use_color() -> bool {
+	logger().lock().unwrap().use_color
+}
+
+fn level_label_plain(level: LogLevel) -> &'static str {
+	match level {
+		LogLevel::Fatal => "[FATAL] ",
+		LogLevel::Error => "[ERROR] ",
+		LogLevel::Warn => "[WARN ] ",
+		LogLevel::Info => "[INFO ] ",
+		LogLevel::Debug => "[DEBUG] ",
+		LogLevel::Trace => "[TRACE] ",
+		LogLevel::Off => "[UNKWN] ",
+	}
+}
+
+fn level_label_json(level: LogLevel) -> &'static str {
+	match level {
+		LogLevel::Fatal => "fatal",
+		LogLevel::Error => "error",
+		LogLevel::Warn => "warn",
+		LogLevel::Info => "info",
+		LogLevel::Debug => "debug",
+		LogLevel::Trace => "trace",
+		LogLevel::Off => "unknown",
+	}
+}
+
+fn write_color_label(out: &mut dyn Write, level: LogLevel) -> io::Result<()> {
+	use color::*;
+	// Only the level name is colored — the brackets stay plain. Each name is
+	// padded to 5 characters so the `]` aligns across levels.
+	let (name, color) = match level {
+		LogLevel::Fatal => ("FATAL", BOLD_RED),
+		LogLevel::Error => ("ERROR", BOLD_RED),
+		LogLevel::Warn => ("WARN ", BOLD_YELLOW),
+		LogLevel::Info => ("INFO ", BOLD_GREEN),
+		LogLevel::Debug => ("DEBUG", BOLD_CYAN),
+		LogLevel::Trace => ("TRACE", BOLD_MAGENTA),
+		LogLevel::Off => ("UNKWN", BOLD_BLUE),
+	};
+	write!(out, "[{color}{name}{RESET}] ")
+}
+
