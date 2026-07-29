@@ -310,3 +310,42 @@ fn write_color_label(out: &mut dyn Write, level: LogLevel) -> io::Result<()> {
 	write!(out, "[{color}{name}{RESET}] ")
 }
 
+#[cfg(feature = "show_time_stamp")]
+fn timestamp_str() -> String {
+	Local::now().format("%d-%b-%Y %H:%M:%S%.6f").to_string()
+}
+
+#[cfg(feature = "show_time_stamp")]
+fn write_time_stamp(out: &mut dyn Write, use_color: bool) -> io::Result<()> {
+	if use_color {
+		write!(out, "{}", color::DIM)?;
+	}
+	write!(out, "[{}] ", timestamp_str())?;
+	if use_color {
+		write!(out, "{}", color::RESET)?;
+	}
+	Ok(())
+}
+
+/// The `http{method=.. path=.. req_id=..}: ` prefix that marks a line as
+/// belonging to one in-flight request, mirroring what the old tracing-based
+/// span output looked like.
+fn write_request_ctx(out: &mut dyn Write, ctx: &RequestCtx) -> io::Result<()> {
+	write!(
+		out,
+		"http{{method={} path={} req_id={}}}: ",
+		ctx.method, ctx.path, ctx.req_id
+	)
+}
+
+/// Source-location info captured at the call site. Only ever constructed
+/// when the `show_source_location` feature is enabled — see `__loc!()`.
+#[doc(hidden)]
+pub struct SourceLoc {
+	pub file: &'static str,
+	pub line: u32,
+	pub func: &'static str,
+}
+
+/// Core logging function: formats and writes a log message. Called by the
+/// `log_*!` macros — prefer those over calling this directly.
