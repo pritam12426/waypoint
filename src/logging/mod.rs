@@ -111,3 +111,89 @@ pub enum LogFormat {
 impl LogFormat {
 	/// Parses a format from a string (used for the `WAYPOINTD_LOG_FORMAT`
 	/// env override).
+	fn from_env_str(s: &str) -> Option<Self> {
+		match s.to_ascii_lowercase().as_str() {
+			"human-readable" | "pretty" | "text" | "human" => Some(LogFormat::Pretty),
+			"json" => Some(LogFormat::Json),
+			_ => None,
+		}
+	}
+}
+
+// ── Output stream: either stderr or an opened file ─────────────────────────
+enum Output {
+	Stderr,
+	File(std::fs::File),
+}
+
+impl Write for Output {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		match self {
+			Output::Stderr => io::stderr().write(buf),
+			Output::File(f) => f.write(buf),
+		}
+	}
+	fn flush(&mut self) -> io::Result<()> {
+		match self {
+			Output::Stderr => io::stderr().flush(),
+			Output::File(f) => f.flush(),
+		}
+	}
+}
+
+struct LoggerState {
+	stream: Option<Output>,
+	level: LogLevel,
+	use_color: bool,
+	format: LogFormat,
+}
+
+static LOGGER: OnceLock<Mutex<LoggerState>> = OnceLock::new();
+
+fn logger() -> &'static Mutex<LoggerState> {
+	LOGGER.get_or_init(|| {
+		Mutex::new(LoggerState {
+			stream: None,
+			level: LogLevel::Warn,
+			use_color: false,
+			format: LogFormat::Pretty,
+		})
+	})
+}
+
+// ── Request correlation IDs ─────────────────────────────────────────────────
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocates a new correlation id for one inbound HTTP request. The HTTP
+/// middleware builds a [`RequestCtx`] from one of these per request, so a
+/// single request's log lines can be grepped out together even when
+/// requests interleave.
+pub fn next_request_id() -> u64 {
+	NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A per-request correlation context, attached to every log line emitted
+/// while handling one HTTP request.
+#[derive(Debug, Clone)]
+pub struct RequestCtx {
+	pub req_id: u64,
+	pub method: String,
+	pub path: String,
+}
+
+impl RequestCtx {
+	pub fn new(method: &str, path: &str) -> Self {
+		Self {
+			req_id: next_request_id(),
+			method: method.to_owned(),
+			path: path.to_owned(),
+		}
+	}
+}
+
+tokio::task_local! {
+	/// The request context of the request currently being handled on this
+	/// task. Read with `try_with` (never `with`) everywhere: logging from a
+	/// `spawn_blocking` thread, or from outside any task, must degrade to
+	/// "no context" instead of panicking.
