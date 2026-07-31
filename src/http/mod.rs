@@ -111,3 +111,57 @@ fn validate_port(port: u16) -> Result<()> {
 }
 
 /// Automated-backup settings, derived from `WAYPOINTD_BACKUP_*`.
+#[derive(Debug, Clone)]
+pub struct BackupConfig {
+	pub dir: PathBuf,
+	pub interval: Duration,
+	pub keep: usize,
+}
+
+/// Everything `run` needs that isn't already `AppState`. Read from
+/// `config` in `main.rs`, so the binary stays a thin env-config shell.
+#[derive(Debug, Clone)]
+pub struct Settings {
+	pub db_path: PathBuf,
+	pub host: String,
+	pub port: u16,
+	pub api_token: Option<String>,
+	pub read_token: Option<String>,
+	pub cookie_secure: bool,
+	pub wal_checkpoint_secs: u64,
+	pub backup: Option<BackupConfig>,
+	pub request_timeout: Duration,
+	pub max_concurrency: usize,
+}
+
+/// Shared server state. `rusqlite::Connection` is `Send` but not `Sync`, so
+/// each connection in the `database::Db` pool is wrapped in its own `Mutex`
+/// and accessed from `tokio::task::spawn_blocking`. The pool is one writer
+/// (all mutations) plus four round-robin readers (list/count/search/stats),
+/// so page loads spread across connections while every write serializes —
+/// WAL is what lets the two coexist without blocking each other.
+///
+/// `jobs` holds the in-memory background-check registry (see `jobs.rs`).
+///
+/// `api_token`: when set, `/api/*` and the docs require authentication
+/// (bearer token or session cookie). `read_token` grants the same access
+/// for GET/HEAD only. `None` leaves everything open.
+///
+/// `concurrency` is the request-saturation semaphore and `request_timeout`
+/// the per-request deadline; both are consumed by the `/api` middleware.
+#[derive(Clone)]
+pub struct AppState {
+	pub db: Arc<database::Db>,
+	pub counts: Arc<cache::CountCache>,
+	pub stats: Arc<cache::StatsCache>,
+	pub jobs: Arc<Jobs>,
+	pub api_token: Option<String>,
+	pub read_token: Option<String>,
+	pub metrics: Arc<Metrics>,
+	pub cookie_secure: bool,
+	pub backup: Option<BackupConfig>,
+	pub idempotency: Arc<IdempotencyStore>,
+	pub concurrency: Arc<Semaphore>,
+	pub request_timeout: Duration,
+}
+
