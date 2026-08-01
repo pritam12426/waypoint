@@ -35,3 +35,10 @@
 //! 3. `core` imports `model` / `shared` / `database`.
 //! 4. `http` imports `core` + `database` + `logging` — never below `core`.
 
+pub mod config;
+pub mod core;
+pub mod database;
+pub mod http;
+pub mod logging;
+pub mod model;
+pub mod shared;
