@@ -237,3 +237,88 @@ pub async fn run(settings: Settings) -> Result<()> {
 		// is only ever "on" when a full token exists) — warn instead of
 		// silently ignoring it.
 		crate::log_warn!(
+			"WAYPOINTD_READ_TOKEN is set but WAYPOINTD_SERVE_TOKEN is not: auth is disabled, the read-only token is ignored"
+		);
+	}
+	if let Some(backup) = &settings.backup {
+		crate::log_info!(
+			"automated backups every {:?} to {} (keeping {})",
+			backup.interval,
+			backup.dir.display(),
+			backup.keep
+		);
+	}
+
+	// Background maintenance: periodic WAL checkpointing and automated
+	// backups. Both are spawn_blocking tasks around `Db` methods and share
+	// the pool safely with the request handlers.
+	if settings.wal_checkpoint_secs > 0 {
+		tokio::spawn(wal_checkpoint_loop(
+			db_arc.clone(),
+			settings.wal_checkpoint_secs,
+		));
+	}
+	if let Some(backup) = settings.backup.clone() {
+		tokio::spawn(backup_loop(db_arc.clone(), backup));
+	}
+
+	let app = app(state);
+	// A bind failure (most often "Address already in use" — another service
+	// holds the port) means the server cannot run at all. Log it as fatal
+	// and terminate the process rather than returning an error: there is
+	// nothing left to serve, so continuing would just sit in a broken loop.
+	let listener =
+		match tokio::net::TcpListener::bind((settings.host.as_str(), settings.port)).await {
+			Ok(listener) => listener,
+			Err(err) => {
+				crate::log_fatal!(
+					"cannot bind to {}:{}: {err} — is another service already using that port?",
+					settings.host,
+					settings.port
+				);
+				std::process::exit(1);
+			}
+		};
+	crate::log_debug!("router assembled, listener bound");
+	crate::log_info!(
+		"waypointd listening on http://{}:{}",
+		settings.host,
+		settings.port
+	);
+	// `into_make_service_with_connect_info` is what lets handlers read
+	// the client's address via `ConnectInfo` — needed for per-request
+	// logging and any future rate limiting.
+	axum::serve(
+		listener,
+		app.into_make_service_with_connect_info::<SocketAddr>(),
+	)
+	.with_graceful_shutdown(shutdown_signal())
+	.await?;
+
+	// Graceful shutdown stops the listener and lets in-flight requests
+	// finish, then we land here. Before the pool drops (which closes every
+	// SQLite connection) run one final TRUNCATE checkpoint so the WAL is
+	// merged into the main database file and emptied; when the last
+	// connection closes SQLite removes the `-wal`/`-shm` sidecars.
+	db_arc.checkpoint();
+	crate::log_info!("waypointd server stopped");
+
+	Ok(())
+}
+
+/// Periodic `PASSIVE` WAL checkpoint so the WAL file doesn't grow without
+/// bound between restarts. Best effort by design — a checkpoint that can't
+/// run this tick just waits for the next.
+async fn wal_checkpoint_loop(db: Arc<database::Db>, secs: u64) {
+	let mut ticker = tokio::time::interval(Duration::from_secs(secs));
+	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	loop {
+		ticker.tick().await;
+		let db = db.clone();
+		let _ = tokio::task::spawn_blocking(move || db.wal_checkpoint_passive()).await;
+	}
+}
+
+/// Automated-backup loop: `VACUUM INTO` snapshot every `cfg.interval`, then
+/// prune the oldest beyond `cfg.keep`. The first backup waits one full
+/// interval so a fresh start isn't slowed by a snapshot it didn't ask for.
