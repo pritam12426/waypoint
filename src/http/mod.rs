@@ -419,3 +419,88 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
 /// Per-request deadline for the `/api` router. A request that exceeds
 /// `state.request_timeout` (including time spent queued on the concurrency
 /// semaphore) is answered 504 `request_timeout` instead of hanging.
+async fn request_timeout(State(state): State<AppState>, req: Request, next: Next) -> Response {
+	match tokio::time::timeout(state.request_timeout, next.run(req)).await {
+		Ok(res) => res,
+		Err(_) => {
+			crate::log_warn!("request timed out after {:?}", state.request_timeout);
+			error::AppError::timeout(format!(
+				"request exceeded the {:?} server deadline",
+				state.request_timeout
+			))
+			.into_response()
+		}
+	}
+}
+
+/// Saturation gate for the `/api` router: at most `state.concurrency`
+/// requests execute at once. When the semaphore is exhausted the request is
+/// rejected immediately with 503 `busy` — better than piling an unbounded
+/// backlog of SQLite queries onto the pool.
+async fn concurrency_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {
+	match state.concurrency.clone().try_acquire_owned() {
+		Ok(permit) => {
+			let response = next.run(req).await;
+			drop(permit);
+			response
+		}
+		Err(_) => {
+			crate::log_warn!("concurrency limit reached — rejecting request");
+			error::AppError::busy("server is at capacity, please retry shortly").into_response()
+		}
+	}
+}
+
+/// Builds the full application router for a given state. Split out from
+/// `run` so integration tests can inject requests directly via
+/// `tower::ServiceExt::oneshot` without binding a listener.
+pub fn app(state: AppState) -> Router {
+	// The `/api` sub-router carries every JSON endpoint. Auth is applied
+	// as a middleware *layer on this sub-router* (not on the whole app), so
+	// the `/keywords` redirects, the probes, and the static frontend stay
+	// open while everything JSON requires a token. Order (outside-in):
+	// auth → timeout → concurrency → body limit → idempotency.
+	let api = Router::new()
+		.route(
+			"/bookmarks",
+			get(handlers::list_bookmarks)
+				.post(handlers::create_bookmark)
+				.delete(handlers::bulk_delete_bookmarks)
+				.patch(handlers::bulk_update_bookmarks),
+		)
+		.route(
+			"/bookmarks/{id}",
+			get(handlers::get_bookmark)
+				.put(handlers::update_bookmark)
+				.delete(handlers::delete_bookmark),
+		)
+		.route("/bookmarks/{id}/restore", post(handlers::restore_bookmark))
+		.route("/bookmarks/{id}/check", get(handlers::check_one_bookmark))
+		.route("/trash", axum::routing::delete(handlers::empty_trash))
+		.route("/categories", get(handlers::list_categories))
+		.route(
+			"/categories/{id}",
+			axum::routing::put(handlers::rename_category).delete(handlers::delete_category),
+		)
+		.route("/tags", get(handlers::list_tags))
+		.route(
+			"/tags/{name}",
+			axum::routing::put(handlers::rename_tag).delete(handlers::delete_tag),
+		)
+		.route("/search", get(handlers::search_bookmarks))
+		.route("/import", post(handlers::import_bookmarks))
+		.route("/export", get(handlers::export_bookmarks))
+		.route("/check", post(handlers::start_check))
+		.route("/check/{id}", get(handlers::check_status))
+		.route("/stats", get(handlers::stats_overview))
+		.route("/stats/domains", get(handlers::domain_stats))
+		.route("/stats/tags", get(handlers::stats_tags))
+		.route(
+			"/stats/bookmarks/{id}",
+			get(handlers::stats_bookmark_detail),
+		)
+		.route("/stats/top-visited", get(handlers::stats_top_visited))
+		.route("/stats/never-visited", get(handlers::stats_never_visited))
+		.route("/stats/orphan-tags", get(handlers::stats_orphan_tags))
+		.route("/stats/hygiene", get(handlers::stats_hygiene))
+		.route("/stats/activity", get(handlers::stats_activity))
