@@ -165,3 +165,75 @@ pub struct AppState {
 	pub request_timeout: Duration,
 }
 
+impl AppState {
+	/// Recompute every warm cache entry in place after a successful write,
+	/// so the in-memory caches reflect the new data immediately and the next
+	/// read is still a hit. Entries that were never cached stay cold and are
+	/// computed on demand as before. Runs the recomputes on a blocking task
+	/// (they are SQLite queries); if that task fails the caches are dropped
+	/// instead so nothing stale is ever served.
+	pub async fn refresh_caches(&self) {
+		let counts = self.counts.clone();
+		let stats = self.stats.clone();
+		let db = self.db.clone();
+		let ok = tokio::task::spawn_blocking(move || {
+			let conn = db.reader();
+			counts.refresh(&conn);
+			stats.refresh(&conn);
+		})
+		.await
+		.is_ok();
+		if !ok {
+			crate::log_warn!("cache refresh panicked — invalidating caches instead");
+			self.invalidate_caches();
+		}
+	}
+
+	/// Drop both caches. The visit-tracking redirects and any cache-refresh
+	/// failure land here: coarse invalidation is the safe choice because a
+	/// bookmark, tag, or category mutation can change any filter's count and
+	/// any aggregate.
+	pub fn invalidate_caches(&self) {
+		self.counts.invalidate();
+		self.stats.invalidate();
+	}
+}
+
+pub async fn run(settings: Settings) -> Result<()> {
+	// Fail fast on bad bind arguments *before* touching the database,
+	// so a typo'd host/port never leaves a half-initialized server.
+	validate_host(&settings.host)?;
+	validate_port(settings.port)?;
+
+	let db = database::Db::open(&settings.db_path)?;
+	crate::log_info!("database ready at {}", settings.db_path.display());
+
+	// A clone kept here survives the move into the router below, so the
+	// shutdown path and the background maintenance tasks can still reach
+	// the pool after the server stops serving.
+	let db_arc = Arc::new(db);
+	let state = AppState {
+		db: db_arc.clone(),
+		counts: Arc::new(cache::CountCache::new()),
+		stats: Arc::new(cache::StatsCache::new()),
+		jobs: Arc::new(Jobs::new()),
+		api_token: settings.api_token.clone(),
+		read_token: settings.read_token.clone(),
+		metrics: Arc::new(Metrics::new()),
+		cookie_secure: settings.cookie_secure,
+		backup: settings.backup.clone(),
+		idempotency: Arc::new(IdempotencyStore::new()),
+		concurrency: Arc::new(Semaphore::new(settings.max_concurrency)),
+		request_timeout: settings.request_timeout,
+	};
+
+	if state.api_token.is_some() {
+		crate::log_info!(
+			"API token enabled: requests to /api/* must authenticate (bearer or session cookie)"
+		);
+	}
+	if state.api_token.is_none() && state.read_token.is_some() {
+		// A read-only token with no full token would be unreachable (auth
+		// is only ever "on" when a full token exists) — warn instead of
+		// silently ignoring it.
+		crate::log_warn!(
