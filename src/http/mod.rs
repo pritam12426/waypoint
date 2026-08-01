@@ -504,3 +504,70 @@ pub fn app(state: AppState) -> Router {
 		.route("/stats/orphan-tags", get(handlers::stats_orphan_tags))
 		.route("/stats/hygiene", get(handlers::stats_hygiene))
 		.route("/stats/activity", get(handlers::stats_activity))
+		.route("/admin/backup", post(handlers::admin_backup))
+		// Unmatched JSON paths are a JSON 404, not the SPA fallback.
+		.fallback(handlers::api_404)
+		.layer(middleware::from_fn_with_state(
+			state.clone(),
+			idempotency::idempotency,
+		))
+		.layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+		.layer(middleware::from_fn_with_state(
+			state.clone(),
+			concurrency_limit,
+		))
+		.layer(middleware::from_fn_with_state(
+			state.clone(),
+			request_timeout,
+		))
+		.layer(middleware::from_fn_with_state(
+			state.clone(),
+			auth::require_api_token,
+		));
+
+	// The auth sub-routes are *unauthenticated* — a sign-in form can't call
+	// an endpoint that requires the very credential it's trying to obtain.
+	// `status` reports whether the request carries a valid token so the
+	// frontend knows whether to show the form at all.
+	let auth_routes = Router::new()
+		.route("/signin", post(handlers::sign_in))
+		.route("/signout", post(handlers::sign_out))
+		.route("/status", get(handlers::auth_status));
+
+	let v1 = Router::new().nest("/auth", auth_routes).merge(api);
+
+	// Docs: the raw OpenAPI spec at /api/openapi.json and the interactive
+	// Swagger UI shell at /api/docs (the UI loads swagger-ui-dist from a
+	// CDN, so nothing is embedded in the binary). Both sit behind the same
+	// auth gate as the API.
+	let docs = Router::new()
+		.route("/api/openapi.json", get(serve_openapi))
+		.route("/api/docs", get(serve_docs_ui))
+		.layer(middleware::from_fn_with_state(
+			state.clone(),
+			auth::require_api_token,
+		));
+
+	// Probes and metrics live at the top level, outside the auth gate and
+	// outside the timeout/concurrency layers, so an overloaded or
+	// unauthenticated server can still be observed and restarted by its
+	// supervisor.
+	let ops = Router::new()
+		.route("/healthz", get(handlers::healthz))
+		.route("/readyz", get(handlers::readyz))
+		.route("/metrics", get(handlers::metrics));
+
+	Router::new()
+		.route("/keywords", get(handlers::keyword_list))
+		.route("/keywords/{keyword}", get(handlers::keyword_redirect))
+		.route("/open/{id}", get(handlers::open_bookmark))
+		.merge(ops)
+		.nest("/api", v1)
+		.merge(docs)
+		// Everything unmatched — including the frontend root `/` and its
+		// assets — falls through to the embedded static file handler.
+		.fallback(handlers::static_handler)
+		.layer(CatchPanicLayer::new())
+		.layer(middleware::from_fn_with_state(state.clone(), log_request))
+		.with_state(state)
+}
