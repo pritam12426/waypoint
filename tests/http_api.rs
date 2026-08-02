@@ -414,3 +414,67 @@ async fn duplicate_url_is_a_conflict() {
 }
 
 #[tokio::test]
+async fn duplicate_keyword_is_a_conflict() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://one.example", "keyword": "kw" }).to_string()),
+	)
+	.await;
+
+	// Same keyword on a different URL is a friendly 409, not a raw
+	// SQLite constraint message.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://two.example", "keyword": "kw" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CONFLICT);
+	let text = body_text(res).await;
+	assert!(text.contains("conflict_keyword"), "body: {text}");
+	assert!(text.contains("already in use"), "body: {text}");
+	assert!(
+		!text.contains("UNIQUE constraint"),
+		"raw SQLite message leaked: {text}"
+	);
+
+	// A real second bookmark lets us test the PUT path.
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://three.example" }).to_string()),
+	)
+	.await;
+
+	// Setting a duplicate keyword on an existing bookmark via PUT is the
+	// same friendly 409.
+	let res = request(
+		&state,
+		Method::PUT,
+		"/api/bookmarks/2",
+		Body::from(json!({ "keyword": "kw" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CONFLICT);
+	let text = body_text(res).await;
+	assert!(text.contains("conflict_keyword"), "body: {text}");
+
+	// Re-saving the same keyword on its own bookmark stays valid.
+	let res = request(
+		&state,
+		Method::PUT,
+		"/api/bookmarks/1",
+		Body::from(json!({ "keyword": "kw" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
