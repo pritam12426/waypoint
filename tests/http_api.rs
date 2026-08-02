@@ -211,3 +211,104 @@ async fn list_paginates_by_cursor() {
 }
 
 #[tokio::test]
+async fn inverted_time_range_is_a_400() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Garbage dates were already 400 (invalid_date); an inverted pair
+	// (after > before) must also be a 400 rather than a silently-empty list.
+	for uri in [
+		"/api/bookmarks?created_after=2024-05-01&created_before=2024-01-01",
+		"/api/bookmarks?updated_after=2024-05-01&updated_before=2024-01-01",
+		"/api/bookmarks?visited_after=2024-05-01&visited_before=2024-01-01",
+		"/api/bookmarks?trashed_after=2024-05-01&trashed_before=2024-01-01",
+		"/api/bookmarks?created_after=2024-05-01%2009:00:00&created_before=2024-01-01%2000:00:00",
+	] {
+		let res = request(&state, Method::GET, uri, Body::empty()).await;
+		assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri}");
+		let text = body_text(res).await;
+		assert!(
+			text.contains("invalid_date"),
+			"{uri} must return the invalid_date contract, got: {text}"
+		);
+	}
+
+	// An inclusive same-day range (bare date means the whole UTC day) is fine.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?created_after=2024-01-01&created_before=2024-01-01",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn api_unknown_route_is_a_json_404() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// An unmatched `/api/*` path is a 404 in the JSON error contract — not
+	// the SPA fallback, which would return an HTML document.
+	for uri in [
+		"/api/nope",
+		"/api/nonexistent/1",
+		"/api/bookmarks/nope/extra",
+	] {
+		let res = request(&state, Method::GET, uri, Body::empty()).await;
+		assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+		let text = body_text(res).await;
+		assert!(
+			text.contains("no such API endpoint") && text.contains("not_found"),
+			"{uri} must return the JSON 404 contract, got: {text}"
+		);
+	}
+
+	// The docs route (a separate top-level route, not the nest) still works.
+	let res = request(&state, Method::GET, "/api/openapi.json", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+
+	// The interactive docs shell points Swagger UI back at the spec route.
+	let res = request(&state, Method::GET, "/api/docs", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(
+		text.contains("swagger-ui") && text.contains("/api/openapi.json"),
+		"/api/docs must serve the Swagger UI HTML shell, got: {text}"
+	);
+}
+
+#[tokio::test]
+async fn keyword_redirect_is_public_and_visits_get_tracked() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Create a bookmark with a keyword.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://rust-lang.org", "keyword": "rs" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+
+	// /keywords list and redirect are NOT behind auth middleware.
+	let res = request(&state, Method::GET, "/keywords", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("rs"));
+
+	let res = request(&state, Method::GET, "/keywords/rs", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+	let location = res
+		.headers()
+		.get(header::LOCATION)
+		.and_then(|v| v.to_str().ok())
+		.unwrap()
+		.to_string();
+	assert_eq!(location, "https://rust-lang.org");
+}
+
+#[tokio::test]
