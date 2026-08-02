@@ -312,3 +312,105 @@ async fn keyword_redirect_is_public_and_visits_get_tracked() {
 }
 
 #[tokio::test]
+async fn open_bookmark_is_public_and_tracks_visits() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Create a bookmark with no keyword — /open/{id} must work for any
+	// bookmark, not just ones with a shortcut.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://example.com/visit", "title": "Visit Me" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let id = created["id"].as_i64().unwrap();
+	assert_eq!(created["visit_count"], 0);
+
+	// /open/{id} is NOT behind auth middleware and 307-redirects to the URL.
+	let res = request(&state, Method::GET, &format!("/open/{id}"), Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+	let location = res
+		.headers()
+		.get(header::LOCATION)
+		.and_then(|v| v.to_str().ok())
+		.unwrap()
+		.to_string();
+	assert_eq!(location, "https://example.com/visit");
+
+	// The visit is recorded fire-and-forget, so poll briefly for it.
+	let mut visit_count = 0i64;
+	for _ in 0..50 {
+		let res = request(
+			&state,
+			Method::GET,
+			&format!("/api/bookmarks/{id}"),
+			Body::empty(),
+		)
+		.await;
+		let bookmark: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+		visit_count = bookmark["visit_count"].as_i64().unwrap_or(0);
+		if visit_count == 1 {
+			assert!(bookmark["last_visited_at"].is_string());
+			break;
+		}
+		tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+	}
+	assert_eq!(
+		visit_count, 1,
+		"visit_count should increment after /open/{id}"
+	);
+}
+
+#[tokio::test]
+async fn errors_use_json_body() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Missing bookmark -> 404 with a JSON error body.
+	let res = request(&state, Method::GET, "/api/bookmarks/999", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+	let text = body_text(res).await;
+	assert!(text.contains("not_found"));
+
+	// Search without a query -> 400.
+	let res = request(&state, Method::GET, "/api/search", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+	let text = body_text(res).await;
+	assert!(text.contains("query_required"));
+}
+
+#[tokio::test]
+async fn duplicate_url_is_a_conflict() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let body = json!({ "url": "https://example.com/dup" }).to_string();
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(body.clone()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+
+	let res = request(&state, Method::POST, "/api/bookmarks", Body::from(body)).await;
+	assert_eq!(res.status(), StatusCode::CONFLICT);
+	// Every AppError response carries the machine-readable code as a header
+	// too, and the failure-logging middleware skips responses tagged this
+	// way (they already logged code + message).
+	assert_eq!(
+		res.headers()
+			.get("x-waypoint-error")
+			.map(|v| v.to_str().unwrap()),
+		Some("conflict_url")
+	);
+	let text = body_text(res).await;
+	assert!(text.contains("conflict_url"));
+}
+
+#[tokio::test]
