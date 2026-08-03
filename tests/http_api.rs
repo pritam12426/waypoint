@@ -478,3 +478,68 @@ async fn duplicate_keyword_is_a_conflict() {
 }
 
 #[tokio::test]
+async fn stats_endpoints_accept_limit_and_offset() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	for url in [
+		"https://aaa.example",
+		"https://bbb.example",
+		"https://ccc.example",
+	] {
+		let res = request(
+			&state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(json!({ "url": url }).to_string()),
+		)
+		.await;
+		assert_eq!(res.status(), StatusCode::CREATED);
+	}
+
+	// One domain per bookmark: limit slices the ranking, offset pages it.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/stats/domains?limit=2",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	assert_eq!(body.as_array().unwrap().len(), 2);
+
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/stats/domains?limit=2&offset=2",
+		Body::empty(),
+	)
+	.await;
+	let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	assert_eq!(body.as_array().unwrap().len(), 1);
+
+	// The paged tag/activity endpoints share the same contract.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/stats/activity?limit=1&offset=1",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+
+	// Out-of-range limits are a 400 invalid_limit, like the list endpoint.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/stats/domains?limit=0",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+	let text = body_text(res).await;
+	assert!(text.contains("invalid_limit"), "body: {text}");
+}
+
+#[tokio::test]
