@@ -543,3 +543,116 @@ async fn stats_endpoints_accept_limit_and_offset() {
 }
 
 #[tokio::test]
+async fn stats_endpoints_are_cached_with_etag_and_304() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let etag = res
+		.headers()
+		.get(header::ETAG)
+		.expect("first stats response carries an ETag")
+		.to_str()
+		.unwrap()
+		.to_string();
+	assert_eq!(
+		res.headers().get(header::CACHE_CONTROL).unwrap(),
+		"private, max-age=30"
+	);
+	let first_body = body_text(res).await;
+
+	// The same aggregate with a matching If-None-Match short-circuits to 304.
+	let res = request_with_headers(
+		&state,
+		Method::GET,
+		"/api/stats",
+		header::IF_NONE_MATCH,
+		etag.clone(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+	let empty = body_text(res).await;
+	assert!(empty.is_empty(), "304 must have no body, got {empty:?}");
+
+	// A stale or missing If-None-Match returns the full body again, and the
+	// ETag is stable across requests (cache hit vs cache miss both produce
+	// the same digest).
+	let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(body_text(res).await, first_body);
+
+	// Distinct aggregate keys are cached separately; a successful write
+	// refreshes the warm entries in place rather than dropping them.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://d.example" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	// The write recomputed the overview body, so the entry survives (not
+	// dropped) and already reflects the new bookmark.
+	assert!(
+		state.stats.get("overview").is_some(),
+		"a successful write must refresh, not drop, the stats cache"
+	);
+	let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_ne!(body_text(res).await, first_body);
+}
+
+#[tokio::test]
+async fn successful_write_refreshes_warm_count_cache() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Warm the count cache: the first list populates the default-filter
+	// entry (the same key `list_bookmarks` computes, minus pagination).
+	let res = request(&state, Method::GET, "/api/bookmarks", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let key = format!("{:?}", waypointd::model::BookmarkFilter::default());
+	assert_eq!(
+		state.counts.get(&key),
+		Some(0),
+		"listing must warm the count cache"
+	);
+
+	// A successful create must refresh the entry in place — it survives the
+	// write (not dropped for the next read to rebuild) and already carries
+	// the new total.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://refresh.example" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	assert_eq!(
+		state.counts.get(&key),
+		Some(1),
+		"a successful create must refresh, not drop, the count cache"
+	);
+}
+
+async fn request_with_headers(
+	state: &AppState,
+	method: Method,
+	uri: &str,
+	name: axum::http::HeaderName,
+	value: String,
+) -> axum::response::Response {
+	let mut req = Request::builder()
+		.method(method)
+		.uri(uri)
+		.header(name, value)
+		.body(Body::empty())
+		.unwrap();
+	req.extensions_mut()
+		.insert(ConnectInfo("127.0.0.1:1".parse::<SocketAddr>().unwrap()));
+	app(state.clone()).oneshot(req).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
