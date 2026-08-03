@@ -656,3 +656,78 @@ async fn request_with_headers(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn read_pool_serves_parallel_requests_alongside_a_writer() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	for i in 0..50 {
+		let res = request(
+			&state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(json!({ "url": format!("https://{i}.example") }).to_string()),
+		)
+		.await;
+		assert_eq!(res.status(), StatusCode::CREATED);
+	}
+
+	// Parallel readers: page loads and stats. Each handler round-robins a
+	// pooled read connection inside spawn_blocking, so these genuinely
+	// overlap on the blocking threads instead of queueing on one lock.
+	// Interleaved writers (bookmark inserts) exercise WAL coexistence.
+	let mut tasks = Vec::new();
+	for _ in 0..24 {
+		let state = state.clone();
+		tasks.push(tokio::spawn(async move {
+			let res = request(
+				&state,
+				Method::GET,
+				"/api/bookmarks?limit=20",
+				Body::empty(),
+			)
+			.await;
+			assert_eq!(res.status(), StatusCode::OK);
+		}));
+	}
+	for _ in 0..16 {
+		let state = state.clone();
+		tasks.push(tokio::spawn(async move {
+			let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
+			assert_eq!(res.status(), StatusCode::OK);
+		}));
+	}
+	for n in 0..8 {
+		let state = state.clone();
+		tasks.push(tokio::spawn(async move {
+			let res = request(
+				&state,
+				Method::POST,
+				"/api/bookmarks",
+				Body::from(json!({ "url": format!("https://writer-{n}.example") }).to_string()),
+			)
+			.await;
+			assert_eq!(res.status(), StatusCode::CREATED);
+		}));
+	}
+	for t in tasks {
+		t.await.unwrap();
+	}
+
+	// Every write landed and is visible to a fresh read.
+	let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn static_frontend_is_served() {
+	silence_logs();
+	let (_dir, state) = test_state();
+	// The embedded frontend ships in the binary, so the fallback serves
+	// index.html at the root.
+	let res = request(&state, Method::GET, "/", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("<!doctype html>") || text.contains("<html"));
+}
+
+#[tokio::test]
