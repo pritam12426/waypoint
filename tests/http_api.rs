@@ -1002,3 +1002,70 @@ const NETSCAPE: &str = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
 </DL><p>"#;
 
 #[tokio::test]
+async fn import_creates_bookmarks_from_netscape_html() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/import",
+		Body::from(
+			json!({
+				"content": NETSCAPE,
+				"tags": ["imported"],
+				"category": "Inbox",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	let result: serde_json::Value = serde_json::from_str(&text).unwrap();
+	assert_eq!(result["imported"], 2, "{text}");
+	assert_eq!(result["skipped"], 0, "{text}");
+
+	// Category + tags override applied to both bookmarks.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?limit=50",
+		Body::empty(),
+	)
+	.await;
+	let text = body_text(res).await;
+	let items: serde_json::Value = serde_json::from_str(&text).unwrap();
+	let items = items.as_array().unwrap();
+	assert_eq!(items.len(), 2);
+	assert!(items.iter().all(|b| b["category_name"] == "Inbox"));
+	assert!(items.iter().all(|b| b["tags"][0] == "imported"));
+}
+
+#[tokio::test]
+async fn import_is_a_noop_on_duplicates() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	request(
+		&state,
+		Method::POST,
+		"/api/import",
+		Body::from(json!({ "content": NETSCAPE }).to_string()),
+	)
+	.await;
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/import",
+		Body::from(json!({ "content": NETSCAPE }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	let result: serde_json::Value = serde_json::from_str(&text).unwrap();
+	assert_eq!(result["imported"], 0, "{text}");
+	assert_eq!(result["skipped"], 2, "{text}");
+}
+
+#[tokio::test]
