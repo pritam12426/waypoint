@@ -862,3 +862,67 @@ async fn bulk_update_applies_partial_update_and_skips_trashed_ids() {
 }
 
 #[tokio::test]
+async fn empty_trash_dry_run_does_not_purge() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://c.example/one" }).to_string()),
+	)
+	.await;
+	let res = request(&state, Method::DELETE, "/api/bookmarks/1", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+	// Dry run must NOT purge the trash.
+	let res = request(
+		&state,
+		Method::DELETE,
+		"/api/trash?dry_run=true",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(
+		text.contains("\"removed\":0"),
+		"dry run must not delete: {text}"
+	);
+
+	// The trashed bookmark is still listed in the recycle bin.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?trash=true",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("c.example/one"), "{text}");
+
+	// The real call purges it for good.
+	let res = request(&state, Method::DELETE, "/api/trash", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("\"removed\":1"), "{text}");
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?trash=true",
+		Body::empty(),
+	)
+	.await;
+	let text = body_text(res).await;
+	assert!(!text.contains("c.example/one"), "{text}");
+}
+
+// The delete → re-add → restore cycle: a trashed copy and a live re-add can
+// coexist (URLs are unique only outside the trash), but restoring the old
+// trashed copy on top of the live one is a 409 conflict_url — the same
+// contract as a duplicate `POST /api/bookmarks`. And re-trashing the live
+// copy purges the older trashed one, so the trash never holds two bookmarks
+// with the same URL.
+#[tokio::test]
