@@ -731,3 +731,59 @@ async fn static_frontend_is_served() {
 }
 
 #[tokio::test]
+async fn bulk_delete_dry_run_previews_then_trashes() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://a.example/rust", "tags": ["rust"] }).to_string()),
+	)
+	.await;
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://b.example/web" }).to_string()),
+	)
+	.await;
+
+	// Dry run: preview only, nothing changes.
+	let res = request(
+		&state,
+		Method::DELETE,
+		"/api/bookmarks?tag=rust&dry_run=true",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("\"removed\":0"), "{text}");
+	assert!(text.contains("\"ids\":[1]"), "{text}");
+
+	// The previewed bookmark is still fetchable afterwards.
+	let res = request(&state, Method::GET, "/api/bookmarks/1", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+
+	// Real run moves it to the trash (invisible to a plain GET).
+	let res = request(
+		&state,
+		Method::DELETE,
+		"/api/bookmarks?tag=rust",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("\"removed\":1"), "{text}");
+	let res = request(&state, Method::GET, "/api/bookmarks/1", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+	// A catch-all (no ids, no criteria) is refused.
+	let res = request(&state, Method::DELETE, "/api/bookmarks", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
