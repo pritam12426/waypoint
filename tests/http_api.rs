@@ -1069,3 +1069,110 @@ async fn import_is_a_noop_on_duplicates() {
 }
 
 #[tokio::test]
+async fn export_returns_markdown_and_csv_as_plain_text() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	request(
+		&state,
+		Method::POST,
+		"/api/import",
+		Body::from(json!({ "content": NETSCAPE }).to_string()),
+	)
+	.await;
+
+	let res = request(&state, Method::GET, "/api/export?format=md", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(
+		res.headers()["content-type"],
+		"text/markdown; charset=utf-8",
+		"the body is the raw markdown, not a JSON payload"
+	);
+	let text = body_text(res).await;
+	assert!(text.contains("# Bookmarks"));
+	assert!(text.contains("https://work.example/proj"));
+	assert!(!text.trim_start().starts_with('{'), "no JSON wrapper");
+
+	let res = request(&state, Method::GET, "/api/export?format=csv", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(
+		res.headers()["content-type"],
+		"text/csv; charset=utf-8",
+		"the body is the raw CSV, not a JSON payload"
+	);
+	let text = body_text(res).await;
+	assert!(text.starts_with("id,title,url,description,"));
+	assert!(!text.trim_start().starts_with('{'), "no JSON wrapper");
+
+	// The default format is markdown.
+	let res = request(&state, Method::GET, "/api/export", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(
+		res.headers()["content-type"],
+		"text/markdown; charset=utf-8"
+	);
+
+	// An unknown format is a 400.
+	let res = request(&state, Method::GET, "/api/export?format=xml", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Polls `GET /api/check/{id}` until it leaves the running state.
+async fn wait_for_check(state: &AppState, id: serde_json::Value) -> serde_json::Value {
+	for _ in 0..50 {
+		let res = request(
+			state,
+			Method::GET,
+			&format!("/api/check/{id}"),
+			Body::empty(),
+		)
+		.await;
+		assert_eq!(res.status(), StatusCode::OK);
+		let text = body_text(res).await;
+		let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+		if body["status"] != "running" {
+			return body;
+		}
+		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	}
+	panic!("check job {id} did not finish");
+}
+
+#[tokio::test]
+async fn check_job_lifecycle_with_non_http_bookmarks() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Non-http URLs are counted and skipped, never probed — so this run
+	// completes instantly and deterministically without touching the network.
+	for url in ["mailto:test@example.com", "javascript:void(0)"] {
+		request(
+			&state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(json!({ "url": url, "title": url }).to_string()),
+		)
+		.await;
+	}
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/check",
+		Body::from(json!({}).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::ACCEPTED);
+	let text = body_text(res).await;
+	let started: serde_json::Value = serde_json::from_str(&text).unwrap();
+	let id = started["id"].clone();
+
+	let body = wait_for_check(&state, id).await;
+	assert_eq!(body["status"], "finished", "{body}");
+	assert_eq!(body["checked"], 0);
+	assert_eq!(body["skipped"], 2);
+	assert_eq!(body["alive"], 0);
+	assert_eq!(body["dead"], serde_json::json!([]));
+}
+
+#[tokio::test]
