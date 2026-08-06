@@ -1176,3 +1176,95 @@ async fn check_job_lifecycle_with_non_http_bookmarks() {
 }
 
 #[tokio::test]
+async fn check_rejects_delete_and_hard_delete_together() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/check",
+		Body::from(json!({ "delete": true, "hardDelete": true }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+	let text = body_text(res).await;
+	assert!(text.contains("mutually exclusive"), "{text}");
+}
+
+#[tokio::test]
+async fn check_trashes_dead_links() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// A connection to port 1 on loopback is refused immediately — a dead
+	// link that doesn't depend on any external service.
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "http://127.0.0.1:1/", "title": "dead" }).to_string()),
+	)
+	.await;
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/check",
+		Body::from(json!({ "delete": true, "jobs": 2 }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::ACCEPTED);
+	let text = body_text(res).await;
+	let started: serde_json::Value = serde_json::from_str(&text).unwrap();
+	let id = started["id"].clone();
+
+	let body = wait_for_check(&state, id).await;
+	assert_eq!(body["status"], "finished", "{body}");
+	assert_eq!(body["checked"], 1);
+	assert_eq!(body["deleted"], 1, "{body}");
+	let dead = body["dead"].as_array().unwrap();
+	assert_eq!(dead.len(), 1);
+	assert!(
+		!dead[0]["reason"].as_str().unwrap_or("").is_empty(),
+		"dead link carries a reason: {body}"
+	);
+
+	// The dead link was moved to the trash, not purged.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?trash=true",
+		Body::empty(),
+	)
+	.await;
+	let text = body_text(res).await;
+	let trash: serde_json::Value = serde_json::from_str(&text).unwrap();
+	assert_eq!(trash.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn check_unknown_job_is_a_404() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(&state, Method::GET, "/api/check/999", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// Binds a one-shot TCP server that answers any request with `200 OK`, so an
+/// "alive" verdict is exercised without touching the external network.
+fn spawn_ok_server() -> SocketAddr {
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	let addr = listener.local_addr().unwrap();
+	std::thread::spawn(move || {
+		let (mut stream, _) = listener.accept().unwrap();
+		let mut buf = [0u8; 4096];
+		let _ = stream.read(&mut buf);
+		let _ =
+			stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+	});
+	addr
+}
+
+#[tokio::test]
