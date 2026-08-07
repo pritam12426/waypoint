@@ -105,3 +105,21 @@ rule-table edits visible immediately instead of pinned by a stale entry).
 `PUT /api/bookmarks/{id}` with `refresh: true` bypasses the read for one
 bookmark and rewrites the cache.
 
+## Background jobs and the caches
+
+`AppState` carries three things beyond the pool. `Jobs` (`src/http/jobs.rs`)
+is the in-memory registry for check runs — ids are monotonic per process,
+finished jobs are reaped after an hour. This is deliberately not
+persistent: a check run is a transient batch, and a crash just loses it.
+
+`CountCache` and `StatsCache` (`src/http/cache.rs`) are the opposite trade.
+They're in-memory, shared across handlers. Each entry carries the closure
+that recomputes it, so a successful write _refreshes_ the warm entries in
+place (the RAM cache reflects the new data immediately and the next read is
+still a hit). The async visit-tracking redirects (which run fire-and-forget
+outside a write transaction) and any cache-refresh failure fall back to
+invalidating them wholesale. On top of that, the stats and tags endpoints send
+`Cache-Control: private, max-age=30` plus a strong ETag and answer 304 when
+the client's `If-None-Match` matches. Two cache layers with two different
+lifetimes, and neither ever has to reason about staleness of individual
+keys.
