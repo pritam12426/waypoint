@@ -1268,3 +1268,94 @@ fn spawn_ok_server() -> SocketAddr {
 }
 
 #[tokio::test]
+async fn check_rejects_loopback_and_reports_dead_skipped_and_404() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// A bookmark whose URL answers 200 but points at loopback must be judged
+	// dead — the checker's shared SSRF guard refuses private/loopback targets
+	// outright, even though a connection would otherwise succeed. This is the
+	// load-bearing assertion: the guard fires *despite* the server being up.
+	let alive_addr = spawn_ok_server();
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": format!("http://{alive_addr}/"), "title": "ssrf" }).to_string()),
+	)
+	.await;
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let ssrf_id = created["id"].as_i64().unwrap();
+
+	// A second loopback URL with no dependency on any external service.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "http://127.0.0.1:1/", "title": "dead" }).to_string()),
+	)
+	.await;
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let dead_id = created["id"].as_i64().unwrap();
+
+	// Non-http URLs are skipped, never probed.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "mailto:test@example.com", "title": "skip" }).to_string()),
+	)
+	.await;
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let skip_id = created["id"].as_i64().unwrap();
+
+	let get = |id: i64| {
+		let state = state.clone();
+		async move {
+			request(
+				&state,
+				Method::GET,
+				&format!("/api/bookmarks/{id}/check"),
+				Body::empty(),
+			)
+			.await
+		}
+	};
+
+	let res = get(ssrf_id).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	assert_eq!(body["status"], "dead", "{body}");
+	assert!(
+		body["reason"]
+			.as_str()
+			.is_some_and(|r| r.contains("refusing to connect")),
+		"{body}"
+	);
+
+	let res = get(dead_id).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	assert_eq!(body["status"], "dead", "{body}");
+	assert!(!body["reason"].as_str().unwrap_or("").is_empty(), "{body}");
+
+	let res = get(skip_id).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	assert_eq!(body["status"], "skipped", "{body}");
+
+	// Unknown ids are a 404.
+	let res = get(99999).await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+	// So are trashed bookmarks — the check only looks at active ones.
+	request(
+		&state,
+		Method::DELETE,
+		&format!("/api/bookmarks/{dead_id}"),
+		Body::empty(),
+	)
+	.await;
+	let res = get(dead_id).await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
