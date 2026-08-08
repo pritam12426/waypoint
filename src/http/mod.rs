@@ -137,7 +137,19 @@ pub async fn run(
 	}
 
 	let app = app(state);
-	let listener = tokio::net::TcpListener::bind((host, port)).await?;
+	// A bind failure (most often "Address already in use" — another service
+	// holds the port) means the server cannot run at all. Log it as fatal
+	// and terminate the process rather than returning an error: there is
+	// nothing left to serve, so continuing would just sit in a broken loop.
+	let listener = match tokio::net::TcpListener::bind((host, port)).await {
+		Ok(listener) => listener,
+		Err(err) => {
+			crate::log_fatal!(
+				"cannot bind to {host}:{port}: {err} — is another service already using that port?"
+			);
+			std::process::exit(1);
+		}
+	};
 	crate::log_debug!("router assembled, listener bound");
 	crate::log_info!("waypoint listening on http://{host}:{port}");
 	// `into_make_service_with_connect_info` is what lets handlers read
