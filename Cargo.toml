@@ -1,0 +1,99 @@
+[package]
+	name = "waypoint"
+	version = "0.1.0"
+	edition = "2024"
+	description = "A modern, self-hosted bookmark manager with keyword shortcuts and full-text search"
+	license = "MIT"
+
+	# `src/main.rs` is the default binary entry point for a package named
+	# "waypoint" — no [[bin]] section needed.
+
+[dev-dependencies]
+	# Integration tests: temp-dir databases (database/cmd tests) and
+	# axum-router request injection via `tower::ServiceExt::oneshot` (http
+	# tests, no port binding needed).
+	tempfile = "3"
+	tower = { version = "0.5", features = ["util"] }
+	http-body-util = "0.1"
+
+[dependencies]
+	# CLI parsing
+	clap = { version = "4", features = ["derive", "env"] }
+
+	# HTTP server
+	axum = "0.8"
+	tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
+	mime_guess = "2"
+
+	# Embeds `frontend/` into the binary so a release build ships as one
+	# file; debug builds can override it with `--static-dir` (the flag is
+	# `#[cfg(debug_assertions)]`-gated, see src/cmd/mod.rs).
+	rust-embed = "8"
+
+	# OpenAPI spec generation. The raw spec is served at /api/openapi.json;
+	# the interactive Swagger UI was dropped (it embeds ~5MB of assets into
+	# the release binary).
+	utoipa = { version = "5", features = ["macros"] }
+
+	# Constant-time comparison for the optional API bearer token.
+	subtle = "2"
+
+	# Database (single file, no server process to run alongside waypoint)
+	rusqlite = { version = "0.40", features = ["bundled"] }
+
+	# Serialization
+	serde = { version = "1", features = ["derive"] }
+	serde_json = "1"
+
+	# Zero-copy static responses (used by the embedded-frontend handler to
+	# avoid heap-copying `&'static [u8]` assets into a `Vec`).
+	bytes = "1"
+
+	# Errors
+	anyhow = "1"
+
+	# Netscape bookmark HTML import (browser exports)
+	regex = "1"
+
+	# `check` — probing bookmarked URLs for dead links. Synchronous so it
+	# fits the sync CLI path (cli::run_command) without an async runtime,
+	# rustls-based, and light enough not to bloat the dependency tree.
+	ureq = "3"
+
+	# `open` subcommand — cross-platform browser launching (macOS `open`,
+	# Linux `xdg-open`, Windows `cmd /c start`).
+	open = "5"
+
+	# Platform cache directory for the fetched-media cache (Linux
+	# `~/.cache`, macOS `~/Library/Caches`, Windows `%LOCALAPPDATA%`).
+	dirs = "5"
+
+	# Percent-decoding of static-asset request paths before they touch the
+	# filesystem, so encoded `..` / backslash components can't escape the
+	# `--static-dir` root (already in the tree via axum/hyper).
+	percent-encoding = "2"
+
+	# Only pulled in when the `show_time_stamp` logging feature is enabled.
+	chrono = { version = "0.4", optional = true }
+
+[features]
+	# Both are on by default: timestamps show in every build, and source
+	# locations only take effect in debug builds (the code paths are gated
+	# on `debug_assertions` too — see src/logging/).
+	default = ["show_time_stamp", "show_source_location"]
+	# See src/logging/mod.rs for what these two toggle.
+	show_time_stamp = ["dep:chrono"]
+	show_source_location = []
+
+[profile.release]
+	# Size-optimized release: -Oz instead of -O3, abort-on-panic (no unwind
+	# table/unwinder), fat LTO across all crates, single codegen unit, and
+	# stripped symbols. Compile times are longer and panics terminate the
+	# process (no catch_unwind in request handlers), but the server binary
+	# drops from ~21M to ~12M.
+	rpath = true
+	opt-level = "s"
+	lto = true
+	codegen-units = 1
+	strip = true
+	panic = "abort"
