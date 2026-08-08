@@ -63,7 +63,7 @@ pub enum Command {
 	/// List bookmarks that have a keyword shortcut
 	Keywords {
 		/// Prepend the bookmark id to each keyword
-		#[arg(long, short = 'i')]
+		#[arg(long)]
 		with_id: bool,
 		/// Also print the URL each keyword points to
 		#[arg(long, short = 'v')]

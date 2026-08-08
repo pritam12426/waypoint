@@ -184,7 +184,25 @@ fn csv_field(s: &str) -> String {
 /// * a blank title falls back to the URL;
 /// * duplicates (URL already in the database) are skipped with a warning
 ///   rather than an error, so a second import of the same file is a no-op.
-pub fn import_html(conn: &Connection, path: &Path) -> Result<()> {
+///
+/// The optional parameters override the per-file structure:
+/// * `category` — when given, every imported bookmark is placed in that
+///   category (created if missing) and the `<H3>` folder headings are
+///   ignored for categorization. When `None`, folders still map to
+///   categories and links outside any folder fall back to the default
+///   category (`DEFAULT_CATEGORY`).
+/// * `tags` — when given, these tags are added to every imported bookmark
+///   (the file itself carries no tags).
+/// * `archive` — when `true`, imported bookmarks are created directly in
+///   the archive (the FTS `bookmarks_fts_archived` index) instead of the
+///   active list.
+pub fn import_html(
+	conn: &Connection,
+	path: &Path,
+	tags: Option<Vec<String>>,
+	category: Option<String>,
+	archive: bool,
+) -> Result<()> {
 	let content = std::fs::read_to_string(path)
 		.with_context(|| format!("failed to read {}", path.display()))?;
 	crate::log_debug!(
@@ -192,6 +210,12 @@ pub fn import_html(conn: &Connection, path: &Path) -> Result<()> {
 		path.display(),
 		content.len()
 	);
+
+	// A category flag overrides every `<H3>` folder; a blank value counts
+	// as "not given" and keeps the folder-derived behavior.
+	let category_override = category
+		.map(|c| c.trim().to_string())
+		.filter(|c| !c.is_empty());
 
 	// One combined regex: an `<H3>...</H3>` capture (folder heading) OR an
 	// `<A ...attributes...>Title</A>` capture. `(?is)` = dot-all +
@@ -203,15 +227,17 @@ pub fn import_html(conn: &Connection, path: &Path) -> Result<()> {
 	// Pull the URL out of the attributes blob.
 	let href_re = regex::Regex::new(r#"(?is)HREF\s*=\s*"([^"]*)""#)?;
 
-	let mut current_category = "Imported".to_string();
+	// Links outside any `<H3>` folder fall back to the default category.
+	let mut current_category = DEFAULT_CATEGORY.to_string();
 	let mut imported = 0;
 	let mut skipped = 0;
 
 	for cap in entry_re.captures_iter(&content) {
-		// Folder heading → switch the current category.
+		// Folder heading → switch the current category (unless a `--category`
+		// override pins every imported bookmark to one category).
 		if let Some(folder) = cap.name("folder") {
 			let name = html_unescape(folder.as_str().trim());
-			if !name.is_empty() {
+			if category_override.is_none() && !name.is_empty() {
 				current_category = name;
 			}
 			continue;
@@ -234,8 +260,12 @@ pub fn import_html(conn: &Connection, path: &Path) -> Result<()> {
 			title: Some(if title.is_empty() { url.clone() } else { title }),
 			url: url.clone(),
 			description: None,
-			category: Some(current_category.clone()),
-			tags: None,
+			category: Some(
+				category_override
+					.clone()
+					.unwrap_or_else(|| current_category.clone()),
+			),
+			tags: tags.clone(),
 			keyword: None,
 			note: None,
 			favicon: None,
@@ -243,6 +273,7 @@ pub fn import_html(conn: &Connection, path: &Path) -> Result<()> {
 			favicon_mode: None,
 			thumbnail_mode: None,
 			starred: Some(false),
+			is_archived: Some(archive),
 		};
 
 		match bookmarks::insert(conn, &new) {
@@ -276,4 +307,123 @@ pub(crate) fn html_unescape(s: &str) -> String {
 		.replace("&quot;", "\"")
 		.replace("&#39;", "'")
 		.replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::database;
+	use crate::model::BookmarkFilter;
+	use std::io::Write;
+	use std::path::PathBuf;
+
+	fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let path = dir.path().join("waypoint_test.sqlite");
+		(dir, path)
+	}
+
+	fn write_bookmarks_file(dir: &tempfile::TempDir, content: &str) -> PathBuf {
+		let path = dir.path().join("bookmarks.html");
+		let mut f = std::fs::File::create(&path).unwrap();
+		f.write_all(content.as_bytes()).unwrap();
+		path
+	}
+
+	/// A minimal Netscape export: one link outside any folder (before the
+	/// first `<H3>` heading), then an `<H3>` folder with a link inside it.
+	const NETSCAPE: &str = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+<DT><A HREF="https://standalone.example/page">Standalone</A>
+<DT><H3>Work</H3>
+<DL><p>
+<DT><A HREF="https://work.example/proj">Project</A>
+</DL><p>
+</DL><p>"#;
+
+	#[test]
+	fn import_maps_folders_and_defaults_links_outside_them() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+		let file = write_bookmarks_file(&_dir, NETSCAPE);
+
+		import_html(&conn, &file, None, None, false).unwrap();
+
+		let all = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(false),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(all.len(), 2, "both links imported");
+
+		let project = all
+			.iter()
+			.find(|b| b.url == "https://work.example/proj")
+			.unwrap();
+		assert_eq!(project.category_name.as_deref(), Some("Work"));
+		assert!(project.tags.is_empty(), "no --tag passed means no tags");
+		assert!(!project.is_archived);
+
+		let standalone = all
+			.iter()
+			.find(|b| b.url == "https://standalone.example/page")
+			.unwrap();
+		assert_eq!(
+			standalone.category_name.as_deref(),
+			Some(DEFAULT_CATEGORY),
+			"links outside any folder fall back to the default category"
+		);
+	}
+
+	#[test]
+	fn import_applies_tags_category_and_archive_flags() {
+		let (_dir, db_path) = temp_db();
+		let conn = database::open(&db_path).unwrap();
+		let file = write_bookmarks_file(&_dir, NETSCAPE);
+
+		import_html(
+			&conn,
+			&file,
+			Some(vec!["rust".to_string(), "todo".to_string()]),
+			Some("Read Later".to_string()),
+			true,
+		)
+		.unwrap();
+
+		// Every imported bookmark is archived, so the active list is empty.
+		let active = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(false),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert!(
+			active.is_empty(),
+			"all imports went straight to the archive"
+		);
+
+		let archived = bookmarks::list(
+			&conn,
+			&BookmarkFilter {
+				archived: Some(true),
+				..Default::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(archived.len(), 2);
+		for b in &archived {
+			assert_eq!(
+				b.category_name.as_deref(),
+				Some("Read Later"),
+				"--category overrides the folder-derived category"
+			);
+			assert_eq!(b.tags, vec!["rust".to_string(), "todo".to_string()]);
+			assert!(b.is_archived);
+		}
+	}
 }

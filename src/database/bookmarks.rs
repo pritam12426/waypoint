@@ -265,8 +265,8 @@ pub fn insert_resolved(
 	if let Err(err) = conn.execute(
 		"INSERT INTO bookmarks
             (title, url, description, domain, category_id, starred, keyword, note,
-             favicon, thumbnail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             favicon, thumbnail, is_archived)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
 		params![
 			title,
 			new.url,
@@ -278,6 +278,7 @@ pub fn insert_resolved(
 			new.note,
 			media.favicon,
 			media.thumbnail,
+			new.is_archived.unwrap_or(false),
 		],
 	) {
 		// A concurrent writer can slip a duplicate past the pre-checks;

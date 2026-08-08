@@ -232,6 +232,7 @@ fn plain_bookmark(url: &str) -> NewBookmark {
 		favicon_mode: None,
 		thumbnail_mode: None,
 		starred: None,
+		is_archived: None,
 	}
 }
 
@@ -308,6 +309,7 @@ fn explicit_media_fields_are_kept() {
 			favicon_mode: None,
 			thumbnail_mode: None,
 			starred: None,
+			is_archived: None,
 		},
 	)
 	.unwrap();
@@ -560,6 +562,7 @@ fn insert_sentinel_forces_generic_media() {
 			favicon_mode: None,
 			thumbnail_mode: None,
 			starred: None,
+			is_archived: None,
 		},
 	)
 	.unwrap();
@@ -597,6 +600,7 @@ fn update_sentinel_resets_media() {
 			favicon_mode: None,
 			thumbnail_mode: None,
 			starred: None,
+			is_archived: None,
 		},
 	)
 	.unwrap();
@@ -1325,5 +1329,6 @@ fn plain_bookmark_media_defaults() -> NewBookmark {
 		favicon_mode: None,
 		thumbnail_mode: None,
 		starred: None,
+		is_archived: None,
 	}
 }

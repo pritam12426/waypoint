@@ -56,7 +56,7 @@ pub enum Command {
 		/// The URL to bookmark
 		url: String,
 		/// Title to display instead of the page's <title>
-		#[arg(long, short = 't')]
+		#[arg(long)]
 		title: Option<String>,
 		/// Shortcut keyword served at /keywords/{keyword}
 		#[arg(long, short = 'k')]
@@ -65,7 +65,7 @@ pub enum Command {
 		#[arg(long, short = 'c')]
 		category: Option<String>,
 		/// Comma-separated list of tags
-		#[arg(long, short = 'g', value_delimiter = ',')]
+		#[arg(long, short = 't', value_delimiter = ',')]
 		tags: Option<Vec<String>>,
 		/// Short description shown in search results
 		#[arg(long, short = 'd')]
@@ -85,7 +85,6 @@ pub enum Command {
 		/// `--favicon`, `--no-custom-favicon`, `--no-thumbnail`)
 		#[arg(
 			long,
-			short = 'i',
 			conflicts_with_all = ["favicon", "no_custom_favicon", "no_thumbnail"]
 		)]
 		thumbnail: Option<String>,
@@ -157,7 +156,7 @@ pub enum Command {
 		#[arg(long, short = 'c')]
 		category: Option<String>,
 		/// Only show results carrying this tag
-		#[arg(long, short = 'g')]
+		#[arg(long, short = 't')]
 		tag: Option<String>,
 		/// Only show results with this keyword shortcut
 		#[arg(long, short = 'k')]
@@ -172,38 +171,51 @@ pub enum Command {
 	/// Find and merge duplicate bookmarks (same URL)
 	Dedup {
 		/// Show duplicates without modifying anything
-		#[arg(long, short = 'n')]
+		#[arg(long)]
 		dry_run: bool,
 		/// Permanently delete duplicates instead of moving to trash
-		#[arg(long, short = 'p')]
+		#[arg(long)]
 		purge: bool,
 	},
-	/// Import bookmarks from a Netscape bookmark file (the format every
-	/// major browser exports to)
+	/// Import bookmarks from a Netscape bookmark HTML file — the format
+	/// every major browser exports to (Chrome/Firefox "Export bookmarks",
+	/// Safari "File > Export > Bookmarks"). Accepts a `.html` file such as
+	/// `bookmarks.html` or `bookmarks_2024-08-01.html`; `<H3>` folder
+	/// headings become categories.
 	Import {
-		/// File to read the bookmarks from
+		/// Netscape bookmark HTML file to read (e.g. bookmarks.html)
 		file: PathBuf,
+		/// Comma-separated tags to apply to every imported bookmark
+		#[arg(long, short = 't', value_delimiter = ',')]
+		tag: Option<Vec<String>>,
+		/// Category for every imported bookmark, overriding folder-derived
+		/// categories (created if missing)
+		#[arg(long, short = 'c')]
+		category: Option<String>,
+		/// Import bookmarks straight into the archive
+		#[arg(long, short = 'a')]
+		archive: bool,
 	},
 	/// Export bookmarks to a file
 	Export {
 		/// File to write the export to, or `-` to print to stdout
 		file: PathBuf,
 		/// Output format
-		#[arg(long, short = 'f', value_enum, default_value = "md")]
+		#[arg(long, value_enum, default_value = "md")]
 		format: ExportFormat,
 	},
 }
 
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
-	/// Bookmark ids to remove
-	#[arg(short = 'i')]
+	/// Bookmark ids to remove (optional when filter criteria are given)
+	#[arg(num_args = 0..)]
 	pub ids: Vec<i64>,
 	/// Permanently delete instead of moving to trash
-	#[arg(long, short = 'p')]
+	#[arg(long)]
 	pub purge: bool,
 	/// Preview which bookmarks match (ids + count) without removing anything
-	#[arg(long, short = 'n')]
+	#[arg(long)]
 	pub dry_run: bool,
 	/// Only remove bookmarks in this category
 	#[arg(long, short = 'c', conflicts_with = "category_id")]
@@ -296,22 +308,22 @@ pub struct UpdateArgs {
 	#[arg(required = true)]
 	pub ids: Vec<i64>,
 	/// New title to display instead of the page's <title>
-	#[arg(long, short = 't')]
+	#[arg(long)]
 	pub title: Option<String>,
 	/// New URL for the bookmark (re-derives the favicon/thumbnail on change)
-	#[arg(long, short = 'u')]
+	#[arg(long)]
 	pub url: Option<String>,
 	/// New keyword shortcut served at /keywords/{keyword}
 	#[arg(long, short = 'k', conflicts_with = "clear_keyword")]
 	pub keyword: Option<String>,
 	/// Remove the keyword shortcut from this bookmark
-	#[arg(long, short = 'e')]
+	#[arg(long)]
 	pub clear_keyword: bool,
 	/// Move the bookmark to this category (created if missing)
 	#[arg(long, short = 'c')]
 	pub category: Option<String>,
 	/// Comma-separated list of tags (replaces the existing tag set)
-	#[arg(long, short = 'g', value_delimiter = ',', conflicts_with_all = ["add_tags", "remove_tags"])]
+	#[arg(long, short = 't', value_delimiter = ',', conflicts_with_all = ["add_tags", "remove_tags"])]
 	pub tags: Option<Vec<String>>,
 	/// Comma-separated tags to add (without touching existing tags)
 	#[arg(long, value_delimiter = ',')]
@@ -337,7 +349,6 @@ pub struct UpdateArgs {
 	/// `--favicon`, `--no-custom-favicon`, `--no-thumbnail`)
 	#[arg(
 		long,
-		short = 'i',
 		conflicts_with_all = ["favicon", "no_custom_favicon", "no_thumbnail"]
 	)]
 	pub thumbnail: Option<String>,
@@ -381,7 +392,7 @@ pub struct UpdateArgs {
 	#[arg(long, short = 'a', conflicts_with = "unarchive")]
 	pub archive: bool,
 	/// Restore an archived bookmark to the active set
-	#[arg(long, short = 'v')]
+	#[arg(long)]
 	pub unarchive: bool,
 }
 
@@ -431,6 +442,7 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 				favicon_mode: mode,
 				thumbnail_mode: mode,
 				starred: Some(starred),
+				is_archived: None,
 			};
 			let id = db::insert(conn, &new)?;
 			if let Some(mode) = mode {
@@ -891,7 +903,12 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 			Ok(())
 		}
 
-		Command::Import { file } => import_export::import_html(conn, &file),
+		Command::Import {
+			file,
+			tag,
+			category,
+			archive,
+		} => import_export::import_html(conn, &file, tag, category, archive),
 
 		Command::Export { file, format } => match format {
 			ExportFormat::Md => import_export::export_markdown(conn, &file),

@@ -144,6 +144,11 @@ pub struct NewBookmark {
 	/// Same as `favicon_mode`, for the thumbnail.
 	pub thumbnail_mode: Option<AssetMode>,
 	pub starred: Option<bool>,
+	/// Create the bookmark straight into the archive instead of the active
+	/// list. `#[serde(default)]` keeps older JSON clients (which never send
+	/// the field) creating active bookmarks.
+	#[serde(default)]
+	pub is_archived: Option<bool>,
 }
 
 /// Payload for updating a bookmark. This is a *partial* update: a field

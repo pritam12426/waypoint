@@ -134,13 +134,13 @@ pub enum Command {
 	#[command(disable_help_subcommand = true)]
 	Check {
 		/// Move dead links to trash (recoverable with `trash restore`)
-		#[arg(long, short = 'd', conflicts_with = "hard_delete")]
+		#[arg(long, conflicts_with = "hard_delete")]
 		delete: bool,
 		/// Permanently delete dead links
 		#[arg(long, short = 'x')]
 		hard_delete: bool,
 		/// Number of concurrent checks
-		#[arg(long, short = 'j', default_value_t = 8)]
+		#[arg(long, default_value_t = 8)]
 		jobs: usize,
 		#[command(subcommand)]
 		command: Option<check::Command>,

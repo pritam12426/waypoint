@@ -25,7 +25,7 @@ pub enum Command {
 		#[arg(default_value = "-")]
 		file: String,
 		/// Output format
-		#[arg(value_enum, long, short = 'f', default_value_t = CheckExportFormat::Csv)]
+		#[arg(value_enum, long, default_value_t = CheckExportFormat::Csv)]
 		format: CheckExportFormat,
 	},
 }

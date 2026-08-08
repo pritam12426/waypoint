@@ -241,10 +241,14 @@ waypoint stats keywords [--with-id] [--with-values] [--limit N]
 ### Import / export and link checking
 
 ```
-waypoint bookmarks import <file>   # Netscape bookmark HTML (from any browser)
+waypoint bookmarks import <file> [--tag t1,t2] [--category NAME] [--archive]
+    # Netscape bookmark HTML (from any browser); --tag tags every imported
+    # bookmark, --category overrides folder-derived categories (created if
+    # missing, folders otherwise map to categories, default = "Uncategorized"),
+    # --archive imports straight into the archive
 waypoint bookmarks export <file> --format md|csv
 
-waypoint check [--delete | --hard-delete] [-j N]
+waypoint check [--delete | --hard-delete] [--jobs N]
     # probe bookmarks for dead links; --delete trashes, --hard-delete removes
 waypoint check export <file> --format csv|md
     # write dead-link report to a file

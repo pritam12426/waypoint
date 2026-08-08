@@ -288,6 +288,7 @@ fn bookmark_for(i: i64) -> NewBookmark {
 		favicon_mode: None,
 		thumbnail_mode: None,
 		starred: Some(i % 5 == 0),
+		is_archived: None,
 	}
 }
 
