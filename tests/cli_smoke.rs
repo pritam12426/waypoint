@@ -408,3 +408,40 @@ fn mode_conflicts_with_explicit_media_args() {
 	.unwrap_err();
 	assert!(err.to_string().contains("cannot be used with"), "{err}");
 }
+
+/// `completions` must work with no database present — it short-circuits
+/// before `database::open` and never touches the filesystem.
+#[test]
+fn completions_need_no_database() {
+	silence_logs();
+	let missing = std::path::Path::new("/nonexistent/waypoint.db");
+
+	cmd::run_command(
+		missing,
+		Command::Completions {
+			shell: "bash".parse().unwrap(),
+		},
+	)
+	.expect("completions should not require a database");
+	cmd::run_command(
+		missing,
+		Command::Completions {
+			shell: "fish".parse().unwrap(),
+		},
+	)
+	.expect("completions should not require a database");
+	cmd::run_command(
+		missing,
+		Command::Completions {
+			shell: "powershell".parse().unwrap(),
+		},
+	)
+	.expect("completions should not require a database");
+	cmd::run_command(
+		missing,
+		Command::Completions {
+			shell: "zsh".parse().unwrap(),
+		},
+	)
+	.expect("completions should not require a database");
+}

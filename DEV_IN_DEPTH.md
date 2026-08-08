@@ -441,6 +441,9 @@ makes no sense.
 - `stats overview|domains|tags|ids|keywords|top-visited|never-visited|orphan-tags|hygiene|activity` — bare `waypoint stats` shows the overview
 - `check [--delete|-d | --hard-delete|-x] [--jobs|-j N] [export]` — bare
   `waypoint check` runs report-only
+- `completions <bash|elvish|fish|powershell|zsh>` — prints a shell completion
+  script to stdout via `clap_complete`; short-circuits in `run_command`
+  before any database connection is opened, so it works with no DB present
 
 ### The clap gotcha that shaped the design
 

@@ -20,6 +20,9 @@
 	# CLI parsing
 	clap = { version = "4", features = ["derive", "env"] }
 
+	# Shell completion script generation (`waypoint completions <shell>`)
+	clap_complete = "4"
+
 	# HTTP server
 	axum = "0.8"
 	tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }

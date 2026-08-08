@@ -259,6 +259,14 @@ waypoint check export <file> --format csv|md
     # write dead-link report to a file
 ```
 
+### Shell completions
+
+```
+waypoint completions <bash|elvish|fish|powershell|zsh>
+    # print a completion script to stdout (no database needed). e.g. for zsh:
+    #   waypoint completions zsh > /usr/local/share/zsh/site-functions/_waypoint
+```
+
 ### Serving
 
 ```

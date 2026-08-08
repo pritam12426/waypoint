@@ -24,7 +24,9 @@ pub mod tags;
 pub mod trash;
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use std::path::{Path, PathBuf};
 
 use crate::database;
@@ -130,6 +132,12 @@ pub enum Command {
 		#[command(subcommand)]
 		command: Option<stats::Command>,
 	},
+	/// Generate a shell completion script (prints to stdout)
+	Completions {
+		/// Shell to generate completions for
+		#[arg(value_enum)]
+		shell: Shell,
+	},
 	/// Find bookmarked sites that no longer exist on the internet
 	#[command(disable_help_subcommand = true)]
 	Check {
@@ -159,6 +167,15 @@ pub enum ExportFormat {
 /// is handled directly in `main`). Opens its own connection since these
 /// are short-lived, one-shot CLI invocations.
 pub fn run_command(db_path: &Path, command: Command) -> Result<()> {
+	// Completion generation needs no database (or even a config), so
+	// short-circuit before opening any connection — `waypoint completions`
+	// must work in a fresh checkout with no DB present.
+	if let Command::Completions { shell } = &command {
+		let mut cmd = Cli::command();
+		generate(*shell, &mut cmd, "waypoint", &mut std::io::stdout());
+		return Ok(());
+	}
+
 	let conn = database::open(db_path)?;
 	crate::log_debug!("opened database at {}", db_path.display());
 	crate::log_debug!("dispatching command: {command:?}");
@@ -167,6 +184,7 @@ pub fn run_command(db_path: &Path, command: Command) -> Result<()> {
 		// `serve` is dispatched from `main` before this function is ever
 		// called; if we see it here something went wrong upstream.
 		Command::Serve { .. } => unreachable!("serve is handled in main"),
+		Command::Completions { .. } => unreachable!("completions is handled above"),
 		Command::Bookmarks(cmd) => bookmarks::run(&conn, *cmd),
 		Command::Tags(cmd) => tags::run(&conn, cmd),
 		Command::Categories(cmd) => categories::run(&conn, cmd),
