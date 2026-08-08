@@ -549,6 +549,7 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 			let id = validate_id(id).map_err(anyhow::Error::msg)?;
 			match db::get(conn, id)? {
 				Some(b) => {
+					crate::log_debug!("fetched bookmark #{} ({})", b.id, b.url);
 					if json {
 						println!("{}", serde_json::to_string_pretty(&b)?);
 					} else {

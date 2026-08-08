@@ -93,6 +93,7 @@ pub struct TrashListArgs {
 }
 
 pub fn run(conn: &Connection, command: Option<Command>) -> Result<()> {
+	crate::log_debug!("trash command: {command:?}");
 	match command {
 		// Bare `waypoint trash` behaves like `trash list`, mirroring how
 		// `check` runs its default action when given no subcommand.

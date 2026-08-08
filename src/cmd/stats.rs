@@ -141,6 +141,7 @@ pub enum Command {
 }
 
 pub fn run(conn: &Connection, command: Option<Command>) -> Result<()> {
+	crate::log_debug!("stats command: {command:?}");
 	// One Paint for the whole command so every non-JSON branch shares the
 	// same TTY detection.
 	let paint = output::Paint::new();

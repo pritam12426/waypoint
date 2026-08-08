@@ -41,6 +41,7 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 	match command {
 		Command::List { json } => {
 			let categories = db::list(conn)?;
+			crate::log_debug!("listed {} categories", categories.len());
 			if json {
 				// Machine output: full serde serialization of the count list.
 				println!("{}", serde_json::to_string_pretty(&categories)?);

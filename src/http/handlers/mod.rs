@@ -182,8 +182,10 @@ where
 	T: serde::Serialize,
 {
 	if let Some(body) = state.stats.get(&key) {
+		crate::log_trace!("cached_json: served {key:?} from stats cache");
 		return Ok(etag_response(body, if_none_match));
 	}
+	crate::log_trace!("cached_json: computing {key:?} (stats cache miss)");
 	let db = state.db.clone();
 	let body = tokio::task::spawn_blocking(move || {
 		let conn = db.reader();
@@ -199,8 +201,10 @@ where
 fn etag_response(body: Vec<u8>, if_none_match: Option<&str>) -> Response {
 	let etag = body_etag(&body);
 	if if_none_match == Some(etag.as_str()) {
+		crate::log_trace!("etag matched: responding 304 Not Modified");
 		return StatusCode::NOT_MODIFIED.into_response();
 	}
+	crate::log_trace!("etag {}: sending body", etag);
 	(
 		[
 			(header::CONTENT_TYPE, "application/json"),
@@ -1095,6 +1099,7 @@ pub async fn list_categories(
 	crate::log_debug!("{addr} GET /api/categories");
 	let db = state.db.clone();
 	let categories = tokio::task::spawn_blocking(move || cat_db::list(&db.reader())).await??;
+	crate::log_debug!("{addr} listed {} categories", categories.len());
 	Ok(Json(categories))
 }
 
@@ -1141,6 +1146,7 @@ pub async fn rename_category(
 	let renamed =
 		tokio::task::spawn_blocking(move || cat_db::rename(&db2.writer(), id, &name)).await??;
 	if renamed {
+		crate::log_info!("{addr} renamed category #{id} -> {:?}", body.name);
 		state.invalidate_caches();
 		Ok(StatusCode::OK)
 	} else {
@@ -1178,6 +1184,7 @@ pub async fn delete_category(
 	}
 	let deleted = tokio::task::spawn_blocking(move || cat_db::delete(&db2.writer(), id)).await??;
 	if deleted {
+		crate::log_info!("{addr} deleted category #{id} (bookmarks moved to default)");
 		state.invalidate_caches();
 		Ok(StatusCode::NO_CONTENT)
 	} else {
@@ -1241,6 +1248,7 @@ pub async fn rename_tag(
 	let renamed =
 		tokio::task::spawn_blocking(move || tag_db::rename(&db.writer(), &old, &new)).await??;
 	if renamed {
+		crate::log_info!("{addr} renamed tag {old_name:?} -> {:?}", body.name);
 		state.invalidate_caches();
 		Ok(StatusCode::OK)
 	} else {
@@ -1270,6 +1278,7 @@ pub async fn delete_tag(
 	let deleted =
 		tokio::task::spawn_blocking(move || tag_db::delete(&db.writer(), &tag_name)).await??;
 	if deleted {
+		crate::log_info!("{addr} deleted tag {name:?}");
 		state.invalidate_caches();
 		Ok(StatusCode::NO_CONTENT)
 	} else {

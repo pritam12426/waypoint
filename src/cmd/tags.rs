@@ -41,6 +41,7 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 	match command {
 		Command::List { json } => {
 			let tags = db::list_with_counts(conn, None, 0)?;
+			crate::log_debug!("listed {} tags", tags.len());
 			if json {
 				println!("{}", serde_json::to_string_pretty(&tags)?);
 			} else {
