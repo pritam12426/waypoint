@@ -84,3 +84,72 @@ never auto-created otherwise). There's no `visits` table — a visit is just
 the two columns on the bookmark row; `database/visits.rs` owns that write
 and the usage stats that read it.
 
+## Full-text search
+
+Two FTS5 virtual tables over the same content table:
+
+- `bookmarks_fts` — active bookmarks only
+- `bookmarks_fts_archived` — archived bookmarks only
+
+Both use `content=bookmarks`, so the index is external-content and the
+actual data isn't duplicated. A bookmark's content lives in exactly one of
+three places, enforced by twelve column-scoped triggers:
+
+- active (`trashed_at IS NULL`, `is_archived = 0`) → main index
+- archived (`trashed_at IS NULL`, `is_archived = 1`) → archive index
+- trashed (`trashed_at IS NOT NULL`) → neither
+
+That makes trash and archive quarantined at the _index level_: main search
+physically cannot match archived or trashed content, and archive search only
+ever sees archived rows. No query-time filter can go stale because no query
+needs one.
+
+The two trigger design points worth knowing about, because they've both
+bitten before:
+
+1. Content-edit triggers carry `OLD.is_archived == NEW.is_archived` guards.
+   `update --archive` rewrites every column in a single UPDATE, which fires
+   the content triggers AND the archive-toggle triggers together. Without
+   the guards they'd fight over a row mid-move; with them, only the toggle
+   triggers act.
+2. The archive-toggle triggers (`bookmarks_fts_archive` / `_unarchive`) move
+   content between indexes in one shot, guarded to non-trashed rows. A
+   trashed bookmark holds no index entry, so there's nothing to move there —
+   the restore trigger re-adds it to whichever index its post-restore
+   `is_archived` says.
+
+Search uses `bm25()` ranking; `archived=true` on the search endpoint hits
+the archive index. Because both indexes are external-content, rebuilding
+them is trivial (the legacy upgrade path does exactly that with
+`delete-all` + re-INSERT).
+
+## Connections and pragmas
+
+`database::open` returns a plain `Connection` for one-shot callers (imports,
+migrations); `database::Db` is the long-lived serving shape — one writer
+plus four round-robin readers, every one inside its own `Mutex`, accessed
+only from `spawn_blocking`. See `architecture.md` for the reasoning; the
+short version is WAL makes concurrent readers + a writer safe, and
+`rusqlite::Connection` not being `Sync` is why the pool looks the way it
+does.
+
+Every connection gets the same pragmas, set in `apply_pragmas`
+(`src/database/mod.rs:194`):
+
+- `foreign_keys = true` — makes the cascading deletes actually cascade.
+  Must be set outside a transaction, which is why the migration SQL doesn't
+  set it.
+- `busy_timeout = 5s` — a brief grace period so two processes (two `serve`
+  instances) wait out a lock instead of erroring instantly.
+- `journal_mode = WAL` + `synchronous = NORMAL` — readers proceed while the
+  writer commits; a power loss may lose the most recent transactions but
+  never corrupts the database (the WAL rebuilds from the last checkpoint).
+- `cache_size = -32768` (~32 MiB page cache), `temp_store = MEMORY` (keeps
+  ORDER BY / GROUP BY temp b-trees in RAM), `mmap_size = 256 MiB` (reads
+  avoid page-cache syscalls).
+
+On graceful shutdown the server runs `PRAGMA wal_checkpoint(TRUNCATE)` on
+the writer before the pool drops, so the `-wal`/`-shm` sidecars come out
+empty and get deleted by the last connection close. If you copy a database
+file while the server is running, checkpoint it first (or just copy all
+three files) — see `operations.md`.
