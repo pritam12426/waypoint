@@ -12,11 +12,17 @@
 
 use axum::{
 	Json,
-	http::StatusCode,
+	http::{HeaderName, StatusCode},
 	response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use utoipa::ToSchema;
+
+/// Response header carrying the machine-readable error code. Set by
+/// `AppError::into_response`; `http::log_failures` reads it to skip
+/// responses that already got a code+message log line, and clients can
+/// read the code without parsing the body.
+pub(crate) const X_WAYPOINT_ERROR: HeaderName = HeaderName::from_static("x-waypoint-error");
 
 /// The JSON body every error response carries: a human-readable `message`
 /// plus a stable machine-readable `code` clients can switch on.
@@ -165,7 +171,7 @@ impl IntoResponse for AppError {
 		// severities: 500s are bugs the operator needs to know about, 4xxs
 		// are routine client mistakes.
 		if status == StatusCode::INTERNAL_SERVER_ERROR {
-			crate::log_error!("request failed with internal error");
+			crate::log_error!("request failed ({}): {}", self.code.as_str(), self.message);
 		} else {
 			crate::log_warn!(
 				"request rejected ({}): {}",
@@ -179,6 +185,10 @@ impl IntoResponse for AppError {
 			code: self.code.as_str().into(),
 		});
 		let mut res = (status, body).into_response();
+		// The error code as a header so `http::log_failures` can tell this
+		// (already-logged) failure apart from unlogged ones.
+		res.headers_mut()
+			.insert(X_WAYPOINT_ERROR, self.code.as_str().parse().unwrap());
 		// RFC 7235: a 401 must carry a `WWW-Authenticate` challenge so
 		// clients know which scheme to use. The frontend's `fetch` reads it
 		// to decide whether to prompt for a token.

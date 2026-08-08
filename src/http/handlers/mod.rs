@@ -1860,7 +1860,7 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 			crate::log_trace!("static: {path:?} missing, served fallback index.html (disk)");
 			return raw_response(StatusCode::OK, "text/html", Body::from(bytes));
 		}
-		crate::log_debug!("static: {path:?} not found in {}", dir.display());
+		crate::log_trace!("static: {path:?} not found in {}", dir.display());
 		return (StatusCode::NOT_FOUND, "not found").into_response();
 	}
 
@@ -1900,7 +1900,7 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 				)
 			}
 			None => {
-				crate::log_debug!("static: {path:?} not found (no embedded index.html)");
+				crate::log_trace!("static: {path:?} not found (no embedded index.html)");
 				(StatusCode::NOT_FOUND, "not found").into_response()
 			}
 		},

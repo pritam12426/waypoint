@@ -25,13 +25,17 @@ pub use cache::{CountCache, StatsCache};
 use crate::database;
 use anyhow::Result;
 use axum::Router;
+use axum::extract::Request;
 use axum::middleware;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use docs::serve_openapi;
+use error::X_WAYPOINT_ERROR;
 
 /// Validates a bind host before any listener is created. Accepts a literal
 /// IPv4/IPv6 address or an RFC 1123 hostname (e.g. `localhost`). Applies to
@@ -148,6 +152,34 @@ pub async fn run(
 	Ok(())
 }
 
+/// Logs every failed response the handlers didn't already log.
+///
+/// Handlers return `Result<_, AppError>`, and `AppError::into_response`
+/// logs its own rejection with the error code + message. This middleware
+/// picks up the *other* ways a request goes unfulfilled — axum extractor
+/// rejections (malformed JSON body, bad query string, unparseable path
+/// segment), missing static assets, and anything else that returns a
+/// 4xx/5xx without passing through `AppError`. The `x-waypoint-error`
+/// header marks responses that were already logged, so nothing is reported
+/// twice. 4xx -> warn, 5xx -> error; both are visible at the default
+/// `info` serve log level.
+async fn log_failures(req: Request, next: Next) -> Response {
+	let method = req.method().clone();
+	let path = req.uri().path().to_owned();
+	let response = next.run(req).await;
+	let status = response.status();
+	if (status.is_client_error() || status.is_server_error())
+		&& !response.headers().contains_key(X_WAYPOINT_ERROR)
+	{
+		if status.is_server_error() {
+			crate::log_error!("{method} {path}: failed with {status}");
+		} else {
+			crate::log_warn!("{method} {path}: rejected with {status}");
+		}
+	}
+	response
+}
+
 /// Builds the full application router for a given state. Split out from
 /// `run` so integration tests can inject requests directly via
 /// `tower::ServiceExt::oneshot` without binding a listener.
@@ -224,5 +256,6 @@ pub fn app(state: AppState) -> Router {
 		// Everything unmatched — including the frontend root `/` and its
 		// assets — falls through to the embedded static file handler.
 		.fallback(handlers::static_handler)
+		.layer(middleware::from_fn(log_failures))
 		.with_state(state)
 }

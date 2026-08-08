@@ -382,6 +382,15 @@ async fn duplicate_url_is_a_conflict() {
 
 	let res = request(&state, Method::POST, "/api/bookmarks", Body::from(body)).await;
 	assert_eq!(res.status(), StatusCode::CONFLICT);
+	// Every AppError response carries the machine-readable code as a header
+	// too, and the failure-logging middleware skips responses tagged this
+	// way (they already logged code + message).
+	assert_eq!(
+		res.headers()
+			.get("x-waypoint-error")
+			.map(|v| v.to_str().unwrap()),
+		Some("conflict_url")
+	);
 	let text = body_text(res).await;
 	assert!(text.contains("conflict_url"));
 }
