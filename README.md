@@ -180,6 +180,7 @@ waypoint bookmarks remove [<id>...] [options]
     --category C --category-id N --tag T --keyword K
     --created-after/--before D   --updated-after/--before D
     --visited-after/--before D
+    # D = YYYY-MM-DD[ HH:MM[:SS]] (UTC); a bare date covers the whole day
     # e.g. waypoint bookmarks remove --tag blog --purge --dry-run
 ```
 
@@ -198,6 +199,7 @@ waypoint bookmarks list [options]
     --visited-after/--before D   filter by last-visit time
     --limit N               max results (default 200)
     --json                  machine-readable output
+    # D = YYYY-MM-DD[ HH:MM[:SS]] (UTC); a bare date covers the whole day
 
 waypoint bookmarks search <query> [options]
     # FTS5 across title, description, note, URL

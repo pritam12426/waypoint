@@ -230,21 +230,27 @@ pub struct RemoveArgs {
 	#[arg(long, short = 'k')]
 	pub keyword: Option<String>,
 	/// Only remove bookmarks created at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub created_after: Option<String>,
 	/// Only remove bookmarks created at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub created_before: Option<String>,
 	/// Only remove bookmarks updated at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub updated_after: Option<String>,
 	/// Only remove bookmarks updated at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub updated_before: Option<String>,
 	/// Only remove bookmarks last visited at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub visited_after: Option<String>,
 	/// Only remove bookmarks last visited at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub visited_before: Option<String>,
 }
@@ -271,18 +277,23 @@ pub struct ListArgs {
 	#[arg(long)]
 	pub created_after: Option<String>,
 	/// Only show bookmarks created at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub created_before: Option<String>,
 	/// Only show bookmarks updated at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub updated_after: Option<String>,
 	/// Only show bookmarks updated at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub updated_before: Option<String>,
 	/// Only show bookmarks last visited at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub visited_after: Option<String>,
 	/// Only show bookmarks last visited at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub visited_before: Option<String>,
 	/// Only show archived bookmarks

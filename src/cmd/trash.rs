@@ -74,9 +74,11 @@ pub struct TrashListArgs {
 	#[arg(long, short = 's')]
 	pub starred: bool,
 	/// Only show bookmarks trashed at or after this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub trashed_after: Option<String>,
 	/// Only show bookmarks trashed at or before this UTC date/time
+	/// (YYYY-MM-DD[ HH:MM[:SS]])
 	#[arg(long)]
 	pub trashed_before: Option<String>,
 	/// Maximum number of bookmarks to show
