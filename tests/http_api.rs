@@ -859,3 +859,72 @@ async fn empty_trash_dry_run_does_not_purge() {
 	let text = body_text(res).await;
 	assert!(!text.contains("c.example/one"), "{text}");
 }
+
+// The delete → re-add → restore cycle: a trashed copy and a live re-add can
+// coexist (URLs are unique only outside the trash), but restoring the old
+// trashed copy on top of the live one is a 409 conflict_url — the same
+// contract as a duplicate `POST /api/bookmarks`. And re-trashing the live
+// copy purges the older trashed one, so the trash never holds two bookmarks
+// with the same URL.
+#[tokio::test]
+async fn restore_conflicts_with_a_live_duplicate_and_trash_stays_deduped() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let url = "https://youtube.com/@ProfessorOfHow";
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": url }).to_string()),
+	)
+	.await;
+	// Move #1 to the trash, then re-add the same URL as #2.
+	let res = request(&state, Method::DELETE, "/api/bookmarks/1", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NO_CONTENT);
+	request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": url }).to_string()),
+	)
+	.await;
+
+	// Restoring the old trashed copy collides with the live #2.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks/1/restore",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CONFLICT);
+	let text = body_text(res).await;
+	assert!(text.contains("conflict_url"), "{text}");
+
+	// Re-trashing #2 purges the older trashed copy #1 — trash stays deduped.
+	let res = request(&state, Method::DELETE, "/api/bookmarks/2", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::NO_CONTENT);
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?trash=true",
+		Body::empty(),
+	)
+	.await;
+	let text = body_text(res).await;
+	let trash: serde_json::Value = serde_json::from_str(&text).unwrap();
+	let items = trash.as_array().unwrap();
+	assert_eq!(items.len(), 1, "trash holds exactly one copy: {text}");
+	assert_eq!(items[0]["id"], 2, "the newest trashed copy wins: {text}");
+
+	// The survivor (the newest copy) restores cleanly.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks/2/restore",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}

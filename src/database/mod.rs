@@ -102,6 +102,17 @@ impl Db {
 		let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.readers.len();
 		self.readers[idx].lock().unwrap()
 	}
+
+	/// Merges the WAL into the main database file (`TRUNCATE` mode). Best
+	/// effort: skips if the writer is momentarily held by an in-flight task.
+	/// Called on graceful server shutdown so the `-wal`/`-shm` sidecars are
+	/// empty (and then deleted by the last connection close) instead of
+	/// being left with pages to replay.
+	pub fn checkpoint(&self) {
+		if let Ok(writer) = self.writer.try_lock() {
+			let _ = writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+		}
+	}
 }
 
 /// The FTS-syncing trigger names from the pre-archive era. Dropping them is

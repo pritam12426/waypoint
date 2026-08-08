@@ -107,7 +107,7 @@ pub enum Command {
 		static_dir: Option<PathBuf>,
 	},
 	/// Bookmark operations: add, list, get, update, remove, open, search,
-	/// dedup, import, export
+	/// import, export
 	// Boxed: the variant carries the largest of the subcommand enums, and
 	// clap supports `Box` here transparently.
 	#[command(subcommand, alias = "bk")]

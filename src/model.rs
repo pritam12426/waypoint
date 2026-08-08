@@ -434,15 +434,6 @@ pub struct MonthlyActivity {
 	pub count: i64,
 }
 
-/// A group of bookmarks sharing the same URL. `keep_id` is the oldest
-/// (lowest id) — it survives a merge; the rest are trashed or purged.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DuplicateGroup {
-	pub url: String,
-	pub keep_id: i64,
-	pub remove_ids: Vec<i64>,
-}
-
 /// The outcome of a criteria-based bulk remove: the bookmarks that matched
 /// the filter (even when nothing was written, i.e. a dry-run or a no-op)
 /// and how many were actually moved to trash / purged.

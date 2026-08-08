@@ -46,7 +46,7 @@ src/
 │   └── checker.rs         link-liveness checker
 ├── cmd/               grouped clap CLI + dispatch
 │   ├── mod.rs             Cli, Command, run_command()
-│   ├── bookmarks.rs       add|list|get|update|remove|open|search|dedup|import|export
+│   ├── bookmarks.rs       add|list|get|update|remove|open|search|import|export
 │   ├── tags.rs            list|rename|delete
 │   ├── categories.rs      list|rename|delete
 │   ├── trash.rs           list|restore|empty
@@ -125,7 +125,7 @@ Highlights:
   `archived: Option<bool>`, `trash`, `limit`, `offset`. Shared by `list` and
   `count` (see gotcha below).
 - Stats shapes (`StatsOverview`, `DomainVisitStats`, `MonthlyActivity`,
-  `DuplicateGroup`, `OrphanTag`, `HygieneStats`, `NeverVisitedBookmark`, …).
+  `OrphanTag`, `HygieneStats`, `NeverVisitedBookmark`, …).
 - `DEFAULT_CATEGORY = "Uncategorized"` — seeded by `database::open` on every
   fresh (and legacy-upgraded) database.
 
@@ -189,7 +189,12 @@ so one SQL file has to be safe for both the fresh and the upgrade path.
 - `tags(id, name UNIQUE)` + junction `bookmark_tags(bookmark_id, tag_id)`.
 - **Partial unique indexes** — `idx_bookmarks_url_active` and
   `idx_bookmarks_keyword_active` are unique _only where `trashed_at IS NULL`_,
-  so a trashed bookmark never blocks re-adding the same URL or keyword.
+  so a trashed bookmark never blocks re-adding the same URL or keyword. To
+  stop the delete → re-add → delete cycle stacking stale copies, the trash
+  paths (`trash`, `remove_ids`, `remove_matching`) purge any older trashed
+  row with the same URL first (`trash_with_dedup`) — the trash holds at most
+  one copy per URL, and `restore` refuses to resurrect a copy whose URL a
+  live row already owns (friendly "URL already exists" error → HTTP 409).
 - `update_bookmark_timestamp` trigger, column-scoped (`AFTER UPDATE OF
   title, url, description, ...`) so visit-tracking writes (`visit_count`,
   `last_visited_at`) don't bump `updated_at`.
@@ -234,7 +239,7 @@ runs two extra passes:
 
 - `bookmarks.rs` — insert/get/update/remove (trash vs `--purge`)/restore,
   `list` (via `BookmarkFilter`), `count` (see gotcha), search queries,
-  keyword lookup, dedup.
+  keyword lookup.
 - `tags.rs`, `categories.rs` — CRUD plus bookmark↔tag link/unlink.
 - `visits.rs` — `record_visit` (fire-and-forget from the keyword redirect) and
   the top-visited / never-visited / domain stats.
@@ -429,7 +434,7 @@ makes no sense.
   (`WAYPOINT_SERVE_TOKEN`), and — **debug builds only** — `--static-dir` to
   serve live frontend files. A release binary has no `--static-dir` flag;
   `main.rs` `#[cfg]`s on it and always passes `None` there.
-- `bookmarks add|list|get|update|remove|open|search|dedup|import|export`
+- `bookmarks add|list|get|update|remove|open|search|import|export`
 - `tags list|rename|delete`
 - `categories list|rename|delete`
 - `trash list|restore` — bare `waypoint trash` lists the recycle bin

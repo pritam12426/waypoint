@@ -121,8 +121,12 @@ pub async fn run(
 	let db = database::Db::open(&db_path)?;
 	crate::log_info!("database ready at {}", db_path.display());
 
+	// A clone kept here survives the move into the router below, so the
+	// shutdown path can still reach the pool for a final checkpoint after
+	// the server stops serving.
+	let db_arc = Arc::new(db);
 	let state = AppState {
-		db: Arc::new(db),
+		db: db_arc.clone(),
 		counts: Arc::new(cache::CountCache::new()),
 		stats: Arc::new(cache::StatsCache::new()),
 		static_dir,
@@ -159,10 +163,44 @@ pub async fn run(
 		listener,
 		app.into_make_service_with_connect_info::<SocketAddr>(),
 	)
+	.with_graceful_shutdown(shutdown_signal())
 	.await?;
+
+	// Graceful shutdown stops the listener and lets in-flight requests
+	// finish, then we land here. Before the pool drops (which closes every
+	// SQLite connection) run one final TRUNCATE checkpoint so the WAL is
+	// merged into the main database file and emptied; when the last
+	// connection closes SQLite removes the `-wal`/`-shm` sidecars.
+	db_arc.checkpoint();
 	crate::log_info!("waypoint server stopped");
 
 	Ok(())
+}
+
+/// Waits for a shutdown request: SIGINT (Ctrl-C) or SIGTERM (a supervisor,
+/// `kill`, ...). Both are the polite "stop now" signals; the process exits
+/// through the normal drop path afterwards, so SQLite gets to close its
+/// connections and delete the WAL sidecar files instead of the OS tearing
+/// the process down mid-flight.
+async fn shutdown_signal() {
+	#[cfg(unix)]
+	let terminate = async {
+		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+			.expect("failed to install SIGTERM handler")
+			.recv()
+			.await;
+	};
+	#[cfg(not(unix))]
+	let terminate = std::future::pending::<()>();
+
+	tokio::select! {
+		_ = tokio::signal::ctrl_c() => {
+			crate::log_info!("received SIGINT — shutting down");
+		}
+		_ = terminate => {
+			crate::log_info!("received SIGTERM — shutting down");
+		}
+	}
 }
 
 /// Logs every request as it completes, with its duration, and separately

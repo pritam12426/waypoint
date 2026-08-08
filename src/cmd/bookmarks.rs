@@ -5,7 +5,7 @@
  */
 
 //! `waypoint bookmarks` subcommand: the ten bookmark operations
-//! (add, list, get, update, remove, open, search, dedup, import, export).
+//! (add, list, get, update, remove, open, search, import, export).
 //! Each `Command` variant is a thin translation layer — CLI args in,
 //! `database::bookmarks` / `core::import_export` calls out, human-readable
 //! (or `--json`) output back. Nothing here touches SQL directly.
@@ -167,15 +167,6 @@ pub enum Command {
 		/// Print as JSON instead of a human-readable list
 		#[arg(long, short = 'j')]
 		json: bool,
-	},
-	/// Find and merge duplicate bookmarks (same URL)
-	Dedup {
-		/// Show duplicates without modifying anything
-		#[arg(long)]
-		dry_run: bool,
-		/// Permanently delete duplicates instead of moving to trash
-		#[arg(long)]
-		purge: bool,
 	},
 	/// Import bookmarks from a Netscape bookmark HTML file — the format
 	/// every major browser exports to (Chrome/Firefox "Export bookmarks",
@@ -878,45 +869,6 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 				println!("no matches for \"{query}\"");
 			} else {
 				output::print_bookmarks(&bookmarks, json, false)?;
-			}
-			Ok(())
-		}
-
-		Command::Dedup { dry_run, purge } => {
-			let groups = db::find_duplicates(conn)?;
-			if groups.is_empty() {
-				println!("no duplicate URLs found");
-				return Ok(());
-			}
-			let total_remove: usize = groups.iter().map(|g| g.remove_ids.len()).sum();
-			println!(
-				"found {} duplicate URL{} ({} bookmark{} to remove)",
-				groups.len(),
-				if groups.len() == 1 { "" } else { "s" },
-				total_remove,
-				if total_remove == 1 { "" } else { "s" },
-			);
-			for group in &groups {
-				println!("\n  {} (keep #{})", group.url, group.keep_id);
-				for id in &group.remove_ids {
-					// Three modes, one loop: `--dry-run` only narrates,
-					// `--purge` hard-deletes, and the default moves the
-					// duplicates to trash (recoverable).
-					if dry_run {
-						println!("    would remove #{id}");
-					} else if purge {
-						db::purge(conn, *id)?;
-						println!("    purged #{id}");
-					} else {
-						db::trash(conn, *id)?;
-						println!("    moved #{id} to trash");
-					}
-				}
-			}
-			if dry_run {
-				println!("\n(no changes — rerun without --dry-run to apply)");
-			} else {
-				crate::log_info!("dedup: removed {total_remove} duplicate bookmark(s)");
 			}
 			Ok(())
 		}

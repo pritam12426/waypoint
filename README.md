@@ -174,6 +174,9 @@ waypoint bookmarks update <id>... [options]
 
 waypoint bookmarks remove [<id>...] [options]
     # moves to trash by default; --purge deletes for good
+    # trashing a URL purges any older trashed copy of the same URL, so the
+    # trash never holds duplicates (delete -> re-add -> delete keeps only
+    # the newest trashed copy)
     --purge                 delete for good instead of trashing
     --dry-run               preview matching ids/count, change nothing
     # either ids, or one or more criteria (never a bare catch-all):
