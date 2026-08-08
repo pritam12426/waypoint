@@ -63,6 +63,9 @@ pub fn run(
 	if delete && hard_delete {
 		anyhow::bail!("--delete and --hard-delete are mutually exclusive");
 	}
+	crate::log_debug!(
+		"check: delete={delete}, hard_delete={hard_delete}, jobs={jobs}, command={command:?}"
+	);
 	let spec = command.map(|command| match command {
 		Command::Export { file, format } => checker::ExportSpec {
 			format: ExportFormat::from(format),

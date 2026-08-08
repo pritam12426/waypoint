@@ -143,6 +143,7 @@ pub async fn run(
 		app.into_make_service_with_connect_info::<SocketAddr>(),
 	)
 	.await?;
+	crate::log_info!("waypoint server stopped");
 
 	Ok(())
 }

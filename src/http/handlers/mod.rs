@@ -1842,6 +1842,7 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 	// forms) is refused outright — it must never fall through to `index.html`
 	// or reach `dir.join`.
 	let Some(path) = sanitize_static_path(path) else {
+		crate::log_warn!("static path traversal attempt refused: {path:?}");
 		return (StatusCode::NOT_FOUND, "not found").into_response();
 	};
 	// Debug override: `--static-dir` serves a frontend build (e.g.
@@ -1852,11 +1853,14 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 	if let Some(dir) = &state.static_dir {
 		if let Ok(bytes) = tokio::fs::read(dir.join(&path)).await {
 			let mime = mime_guess::from_path(&path).first_or_octet_stream();
+			crate::log_trace!("static: served {path:?} from {} (disk)", dir.display());
 			return raw_response(StatusCode::OK, mime.as_ref(), Body::from(bytes));
 		}
 		if let Ok(bytes) = tokio::fs::read(dir.join("index.html")).await {
+			crate::log_trace!("static: {path:?} missing, served fallback index.html (disk)");
 			return raw_response(StatusCode::OK, "text/html", Body::from(bytes));
 		}
+		crate::log_debug!("static: {path:?} not found in {}", dir.display());
 		return (StatusCode::NOT_FOUND, "not found").into_response();
 	}
 
@@ -1866,6 +1870,7 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 	// [u8]`, hence the borrow/owned split.
 	match Assets::get(&path) {
 		Some(file) => {
+			crate::log_trace!("static: served {path:?} (embedded)");
 			let mime = mime_guess::from_path(path).first_or_octet_stream();
 			let data = match file.data {
 				Cow::Borrowed(b) => b,
@@ -1879,6 +1884,9 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 		}
 		None => match Assets::get("index.html") {
 			Some(file) => {
+				crate::log_trace!(
+					"static: {path:?} missing, served fallback index.html (embedded)"
+				);
 				let data = match file.data {
 					Cow::Borrowed(b) => b,
 					Cow::Owned(v) => {
@@ -1891,7 +1899,10 @@ async fn serve_asset(state: &AppState, path: &str) -> Response {
 					Body::from(Bytes::from_static(data)),
 				)
 			}
-			None => (StatusCode::NOT_FOUND, "not found").into_response(),
+			None => {
+				crate::log_debug!("static: {path:?} not found (no embedded index.html)");
+				(StatusCode::NOT_FOUND, "not found").into_response()
+			}
 		},
 	}
 }

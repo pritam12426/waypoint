@@ -825,10 +825,16 @@ pub fn run(conn: &Connection, command: Command) -> Result<()> {
 				// `open::with_command`; otherwise defer to `open::that`,
 				// which respects the OS default browser.
 				if let Some(browser) = &browser {
-					open::with_command(url, browser).status()?;
+					if let Err(err) = open::with_command(url, browser).status() {
+						crate::log_perror!("failed to open {url} in browser {browser:?}");
+						return Err(err.into());
+					}
 					crate::log_info!("opened {url} in browser {browser:?}");
 				} else {
-					open::that(url)?;
+					if let Err(err) = open::that(url) {
+						crate::log_perror!("failed to open {url} in browser");
+						return Err(err.into());
+					}
 					crate::log_info!("opened {url}");
 				}
 				println!("opened {url}");

@@ -161,6 +161,7 @@ pub enum ExportFormat {
 pub fn run_command(db_path: &Path, command: Command) -> Result<()> {
 	let conn = database::open(db_path)?;
 	crate::log_debug!("opened database at {}", db_path.display());
+	crate::log_debug!("dispatching command: {command:?}");
 
 	match command {
 		// `serve` is dispatched from `main` before this function is ever

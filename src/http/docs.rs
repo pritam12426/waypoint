@@ -26,6 +26,7 @@ use crate::model::*;
 /// Serves the generated OpenAPI document as JSON. Used by the `/api`
 /// router's `/api/openapi.json` route.
 pub async fn serve_openapi() -> Json<utoipa::openapi::OpenApi> {
+	crate::log_trace!("GET /api/openapi.json");
 	Json(ApiDoc::openapi())
 }
 

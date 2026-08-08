@@ -39,6 +39,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 
 /// Encodes a page's last `(created_at, id)` into a cursor token.
 pub fn encode_cursor(id: i64, created_at: &str) -> String {
+	crate::log_trace!("encoded page cursor for bookmark #{id} (created_at {created_at})");
 	encode_hex(format!("{id}:{created_at}").as_bytes())
 }
 
@@ -47,11 +48,13 @@ pub fn encode_cursor(id: i64, created_at: &str) -> String {
 pub fn decode_cursor(token: &str) -> Option<(String, i64)> {
 	if token.len() > 512 {
 		// A token that long cannot be a page bound; reject before allocating.
+		crate::log_warn!("rejected cursor token: too long ({} bytes)", token.len());
 		return None;
 	}
 	let decoded = decode_hex(token)?;
 	let text = String::from_utf8(decoded).ok()?;
 	let (id, created_at) = text.split_once(':')?;
+	crate::log_trace!("decoded page cursor -> bookmark #{id} (created_at {created_at})");
 	Some((created_at.to_string(), id.parse().ok()?))
 }
 

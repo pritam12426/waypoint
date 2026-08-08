@@ -38,11 +38,18 @@ impl CountCache {
 
 	/// Returns the cached count if present and younger than the TTL.
 	pub fn get(&self, key: &str) -> Option<i64> {
-		let inner = self.inner.lock().unwrap();
-		match inner.get(key) {
-			Some((at, value)) if at.elapsed() < self.ttl => Some(*value),
-			_ => None,
-		}
+		let hit = {
+			let inner = self.inner.lock().unwrap();
+			match inner.get(key) {
+				Some((at, value)) if at.elapsed() < self.ttl => Some(*value),
+				_ => None,
+			}
+		};
+		crate::log_trace!(
+			"count cache {} for {key:?}",
+			if hit.is_some() { "hit" } else { "miss" }
+		);
+		hit
 	}
 
 	pub fn put(&self, key: &str, value: i64) {
@@ -50,13 +57,16 @@ impl CountCache {
 			.lock()
 			.unwrap()
 			.insert(key.to_owned(), (Instant::now(), value));
+		crate::log_trace!("count cache stored {value} for {key:?}");
 	}
 
 	/// Drop every entry. Called by write handlers: a bookmark, tag, or
 	/// category mutation can change any filter's count, so coarse
 	/// invalidation is the safe choice.
 	pub fn invalidate(&self) {
+		let dropped = self.inner.lock().unwrap().len();
 		self.inner.lock().unwrap().clear();
+		crate::log_trace!("count cache invalidated ({dropped} entries dropped)");
 	}
 }
 
@@ -89,14 +99,26 @@ impl StatsCache {
 	/// Returns a clone of the cached body if present and younger than the
 	/// TTL (cloned so the lock drops before the body is served).
 	pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-		let inner = self.inner.lock().unwrap();
-		match inner.get(key) {
-			Some((at, body)) if at.elapsed() < self.ttl => Some(body.clone()),
-			_ => None,
-		}
+		let hit = {
+			let inner = self.inner.lock().unwrap();
+			match inner.get(key) {
+				Some((at, body)) if at.elapsed() < self.ttl => Some(body.clone()),
+				_ => None,
+			}
+		};
+		crate::log_trace!(
+			"stats cache {} for {key:?}{}",
+			if hit.is_some() { "hit" } else { "miss" },
+			match &hit {
+				Some(body) => format!(" ({} bytes)", body.len()),
+				None => String::new(),
+			}
+		);
+		hit
 	}
 
 	pub fn put(&self, key: &str, body: Vec<u8>) {
+		crate::log_trace!("stats cache stored ({} bytes) for {key:?}", body.len());
 		self.inner
 			.lock()
 			.unwrap()
@@ -104,7 +126,9 @@ impl StatsCache {
 	}
 
 	pub fn invalidate(&self) {
+		let dropped = self.inner.lock().unwrap().len();
 		self.inner.lock().unwrap().clear();
+		crate::log_trace!("stats cache invalidated ({dropped} entries dropped)");
 	}
 }
 

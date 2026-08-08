@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 	waypoint::logging::log_init(cli.log_file.as_deref(), log_level, cli.log_format);
 	waypoint::log_debug!("parsed CLI: {cli:?}");
 
-	match cli.command {
+	let result = match cli.command {
 		// Debug build: `--static-dir` is available, so serve from disk.
 		#[cfg(debug_assertions)]
 		Command::Serve {
@@ -63,5 +63,11 @@ async fn main() -> anyhow::Result<()> {
 		// Everything else (bookmarks/tags/categories/trash/stats/check)
 		// is a synchronous one-shot command.
 		command => waypoint::cmd::run_command(&cli.database, command),
+	};
+	// A failed one-shot command or a crashed server is the one place
+	// `fatal` belongs: the process is about to exit with a non-zero status.
+	if let Err(err) = &result {
+		waypoint::log_fatal!("{err:#}");
 	}
+	result
 }

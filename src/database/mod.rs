@@ -78,6 +78,11 @@ impl Db {
 		let readers = (0..READ_POOL_SIZE)
 			.map(|_| open_reader(path))
 			.collect::<Result<Vec<_>>>()?;
+		crate::log_debug!(
+			"opened connection pool (1 writer + {} readers) for {}",
+			READ_POOL_SIZE,
+			path.display()
+		);
 		Ok(Self {
 			writer: Mutex::new(writer),
 			readers: readers.into_iter().map(Mutex::new).collect(),
@@ -145,6 +150,10 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
 	// around the migration batch.
 	let legacy = is_legacy_schema(&conn)?;
 	if legacy {
+		crate::log_info!(
+			"legacy database detected at {} — running pre/post migration upgrade",
+			path.display()
+		);
 		legacy_preclean(&conn).context("failed to upgrade legacy schema (pre-migration)")?;
 	}
 
@@ -164,6 +173,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
 /// migrations or seeding — the writer is guaranteed to have run them first
 /// (`Db::open` opens readers only after the writer is ready).
 fn open_reader(path: &Path) -> Result<Connection> {
+	crate::log_trace!("opening pooled reader connection for {}", path.display());
 	let mut conn = Connection::open(path)?;
 	apply_pragmas(&mut conn)?;
 	Ok(conn)
