@@ -306,6 +306,28 @@ impl UpdateBookmark {
 
 		ops
 	}
+
+	/// Whether any field actually asks for a change. A request with nothing
+	/// set is a no-op; single updates tolerate it, but a bulk update must
+	/// reject it to avoid a misleading "updated N bookmark(s)".
+	pub fn has_any_change(&self) -> bool {
+		self.title.is_some()
+			|| self.url.is_some()
+			|| self.description.is_some()
+			|| self.category.is_some()
+			|| self.tags.is_some()
+			|| self.add_tags.is_some()
+			|| self.remove_tags.is_some()
+			|| self.keyword.is_some()
+			|| self.note.is_some()
+			|| self.favicon.is_some()
+			|| self.thumbnail.is_some()
+			|| self.favicon_mode.is_some()
+			|| self.thumbnail_mode.is_some()
+			|| self.refresh
+			|| self.starred.is_some()
+			|| self.is_archived.is_some()
+	}
 }
 
 /// A category (the `categories` table row: id + unique name).
@@ -430,6 +452,29 @@ pub struct BulkRemoveResult {
 	pub ids: Vec<i64>,
 	/// How many were actually removed (`0` for a dry-run or a 0-match).
 	pub removed: i64,
+}
+
+/// Payload for a bulk update: one partial update applied to a list of ids.
+/// `ids` must be non-empty and `update` must change at least one field;
+/// ids that don't exist or are trashed are reported in the result's
+/// `skipped` list instead of failing the request.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct BulkUpdateRequest {
+	/// Bookmark ids to update (at least one, each positive).
+	pub ids: Vec<i64>,
+	/// The partial update to apply to every id (see `UpdateBookmark`).
+	pub update: UpdateBookmark,
+}
+
+/// Outcome of a bulk update: which ids the change was applied to and which
+/// were skipped (not found or trashed). A constraint failure (duplicate
+/// URL/keyword) fails the whole request instead, like single updates.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct BulkUpdateResult {
+	/// Ids the update was successfully applied to, in request order.
+	pub updated: Vec<i64>,
+	/// Ids skipped because the bookmark doesn't exist or is trashed.
+	pub skipped: Vec<i64>,
 }
 
 /// Filter/pagination options for listing bookmarks.

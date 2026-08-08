@@ -719,6 +719,81 @@ async fn bulk_delete_dry_run_previews_then_trashes() {
 }
 
 #[tokio::test]
+async fn bulk_update_applies_partial_update_and_skips_trashed_ids() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	for i in 0..3 {
+		request(
+			&state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(
+				json!({ "url": format!("https://bulk{i}.example/page"), "title": format!("B{i}") })
+					.to_string(),
+			),
+		)
+		.await;
+	}
+	// Trash id 3 so it comes back in `skipped`.
+	request(&state, Method::DELETE, "/api/bookmarks/3", Body::empty()).await;
+
+	// One PATCH applies the same change to ids 1..3: add a tag, move to a
+	// category, archive. The trashed id 3 is reported, not an error.
+	let res = request(
+		&state,
+		Method::PATCH,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"ids": [1, 2, 3],
+				"update": {
+					"add_tags": ["rust"],
+					"category": "Media",
+					"is_archived": true,
+				}
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("\"updated\":[1,2]"), "{text}");
+	assert!(text.contains("\"skipped\":[3]"), "{text}");
+
+	// The change landed on the surviving bookmarks.
+	let res = request(&state, Method::GET, "/api/bookmarks/1", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("rust"), "{text}");
+	assert!(text.contains("Media"), "{text}");
+	assert!(text.contains("\"is_archived\":true"), "{text}");
+	let res = request(&state, Method::GET, "/api/bookmarks/2", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let text = body_text(res).await;
+	assert!(text.contains("rust"), "{text}");
+
+	// Empty ids and a nothing-to-change update are both 400.
+	let res = request(
+		&state,
+		Method::PATCH,
+		"/api/bookmarks",
+		Body::from(json!({ "ids": [], "update": { "is_archived": true } }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+	let res = request(
+		&state,
+		Method::PATCH,
+		"/api/bookmarks",
+		Body::from(json!({ "ids": [1], "update": {} }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn empty_trash_dry_run_does_not_purge() {
 	silence_logs();
 	let (_dir, state) = test_state();

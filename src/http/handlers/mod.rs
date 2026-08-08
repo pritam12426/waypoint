@@ -40,9 +40,9 @@ use crate::database::{
 	bookmarks as bm_db, categories as cat_db, stats as st_db, tags as tag_db, visits as vis_db,
 };
 use crate::model::{
-	Bookmark, BookmarkFilter, BulkRemoveResult, Category, DomainCount, DomainVisitStats,
-	HygieneStats, MonthlyActivity, NeverVisitedBookmark, NewBookmark, OrphanTag, StatsOverview,
-	TagCount, UpdateBookmark,
+	Bookmark, BookmarkFilter, BulkRemoveResult, BulkUpdateRequest, BulkUpdateResult, Category,
+	DomainCount, DomainVisitStats, HygieneStats, MonthlyActivity, NeverVisitedBookmark,
+	NewBookmark, OrphanTag, StatsOverview, TagCount, UpdateBookmark,
 };
 use crate::shared;
 
@@ -882,6 +882,123 @@ pub async fn bulk_delete_bookmarks(
 		state.invalidate_caches();
 	}
 	Ok(Json(result))
+}
+
+/// Apply one partial update to many bookmarks by id. All ids receive the
+/// same change; ids that don't exist or are trashed are reported in
+/// `skipped` instead of failing the request.
+///
+/// Media-affecting fields (`url`, `favicon`, `thumbnail`, modes, `refresh`)
+/// resolve per bookmark without holding the writer, mirroring
+/// `update_bookmark`. Validation failures caught in the pre-write pass
+/// (empty payload, duplicate URL/keyword, unresolvable media) abort before
+/// anything is written, so a bad id can't leave a half-applied batch; a
+/// collision that only materializes at write time (a concurrent edit)
+/// aborts mid-batch.
+#[utoipa::path(
+	patch,
+	path = "/bookmarks",
+	tag = "bookmarks",
+	request_body = BulkUpdateRequest,
+	responses(
+		(
+			status = 200,
+			description = "Bulk update applied",
+			body = BulkUpdateResult,
+		),
+		(
+			status = 400,
+			description = "No ids, nothing to change, or invalid parameters",
+			body = ApiErrorBody,
+		),
+		(
+			status = 409,
+			description = "A bookmark with this URL or keyword already exists",
+			body = ApiErrorBody,
+		),
+	)
+)]
+pub async fn bulk_update_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Json(req): Json<BulkUpdateRequest>,
+) -> Result<Json<BulkUpdateResult>, AppError> {
+	crate::log_debug!("{addr} PATCH /api/bookmarks ({} ids)", req.ids.len());
+	if req.ids.is_empty() {
+		return Err(AppError::invalid_payload(
+			"bulk update needs at least one bookmark id",
+		));
+	}
+	for id in &req.ids {
+		validate_id(*id)?;
+	}
+	let update = req.update.clone();
+	// Same gates as the single-update handler, before any id is touched.
+	if !update.has_any_change() {
+		return Err(AppError::invalid_payload(
+			"bulk update has nothing to change",
+		));
+	}
+	if update.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+		return Err(AppError::invalid_url("url cannot be empty"));
+	}
+	validate_keyword(update.keyword.as_deref())?;
+
+	// Pass 1 (off the writer): read each row, duplicate-check, resolve
+	// media. Any failure here aborts before a single write, so a bad id or
+	// a duplicate in the batch can't leave earlier ids half-applied.
+	// Trashed or missing ids are collected as `skipped`, never a hard error.
+	let mut pending: Vec<(i64, Bookmark, crate::core::media::ResolvedMedia)> = Vec::new();
+	let mut skipped: Vec<i64> = Vec::new();
+	for id in req.ids {
+		let db = state.db.clone();
+		let existing = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+		let Some(existing) = existing else {
+			skipped.push(id);
+			continue;
+		};
+		let db = state.db.clone();
+		let seen = existing.clone();
+		let update_for_check = update.clone();
+		tokio::task::spawn_blocking(move || {
+			bm_db::check_update_collisions(&db.reader(), &seen, &update_for_check)
+		})
+		.await??;
+		let seen = existing.clone();
+		let update_for_resolve = update.clone();
+		let media = tokio::task::spawn_blocking(move || {
+			crate::core::media::resolve_update(&seen, &update_for_resolve)
+		})
+		.await?
+		.map_err(AppError::invalid_payload)?;
+		pending.push((id, existing, media));
+	}
+
+	// Pass 2 (writer): persist each pre-resolved update. A bookmark that
+	// vanished between the passes (concurrently trashed) is skipped.
+	let mut updated: Vec<i64> = Vec::new();
+	for (id, seen, media) in pending {
+		let db = state.db.clone();
+		let update_for_db = update.clone();
+		let result = tokio::task::spawn_blocking(move || {
+			bm_db::update_resolved(&db.writer(), id, &update_for_db, &seen, media)
+		})
+		.await??;
+		match result {
+			Some(_) => updated.push(id),
+			None => skipped.push(id),
+		}
+	}
+
+	crate::log_info!(
+		"{addr} bulk update: updated {} bookmark(s), skipped {}",
+		updated.len(),
+		skipped.len()
+	);
+	if !updated.is_empty() {
+		state.invalidate_caches();
+	}
+	Ok(Json(BulkUpdateResult { updated, skipped }))
 }
 
 /// Permanently empty the trash. With `before`, only bookmarks trashed at or

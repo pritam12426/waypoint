@@ -41,6 +41,7 @@ pub async fn serve_openapi() -> Json<utoipa::openapi::OpenApi> {
 		update_bookmark,
 		delete_bookmark,
 		bulk_delete_bookmarks,
+		bulk_update_bookmarks,
 		restore_bookmark,
 		empty_trash,
 		list_categories,
@@ -80,6 +81,8 @@ pub async fn serve_openapi() -> Json<utoipa::openapi::OpenApi> {
 		MonthlyActivity,
 		ApiErrorBody,
 		BulkRemoveResult,
+		BulkUpdateRequest,
+		BulkUpdateResult,
 	)),
 	security(("bearer_auth" = [])),
 	tags(

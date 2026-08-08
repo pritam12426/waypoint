@@ -160,7 +160,8 @@ pub fn app(state: AppState) -> Router {
 			"/bookmarks",
 			get(handlers::list_bookmarks)
 				.post(handlers::create_bookmark)
-				.delete(handlers::bulk_delete_bookmarks),
+				.delete(handlers::bulk_delete_bookmarks)
+				.patch(handlers::bulk_update_bookmarks),
 		)
 		.route(
 			"/bookmarks/{id}",
