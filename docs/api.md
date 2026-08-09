@@ -106,3 +106,110 @@ icon" just by `== null`. And `trashed_at` being non-null is what defines "in
 the recycle bin"; such bookmarks are excluded from most queries and can only
 be listed with `trash=true`.
 
+## Pagination
+
+Two mechanisms, and they don't mix.
+
+**Offset** (the default): `limit` + `offset`. The list default is 200, search
+50, `limit` is clamped to 1–1000. `offset` must be ≥ 0.
+
+**Cursor** (list only): pass `cursor` (the value of `x-next-cursor` from the
+previous response) and `offset` is ignored. The cursor is a keyset bound on
+`(created_at, id)`, the exact columns the list's `ORDER BY created_at DESC`
+walks, so deep pages stay O(page) instead of skipping through an offset
+scan. It only exists on the _active_ list — the trash view never emits one,
+and passing one to `trash=true` is a 400.
+
+Two response headers matter, and both are lowercase (axum 0.8 does not
+normalize header names, so a capital-letter variant silently becomes a
+second, ignored header):
+
+- `x-total-count` — total matches for the query, ignoring pagination.
+- `x-next-cursor` — present only when the page is full (`len == limit`);
+  a short page is the last one, so the header is omitted.
+
+## Bookmarks
+
+### `GET /api/bookmarks` — list
+
+Query parameters are all optional; absent means "don't filter". Filters
+combine with AND.
+
+| param                              | type   | notes                                                                                          |
+| ---------------------------------- | ------ | ---------------------------------------------------------------------------------------------- |
+| `category`                         | string | by category name                                                                               |
+| `category_id`                      | int    | by category id                                                                                 |
+| `tag`                              | string | by tag name                                                                                    |
+| `keyword`                          | string | by keyword                                                                                     |
+| `starred`                          | bool   |                                                                                                |
+| `archived`                         | bool   | `true` = only archived, `false` = only active                                                  |
+| `trash`                            | bool   | lists trashed bookmarks; overrides `archived`                                                  |
+| `created_after` / `created_before` | string | UTC `YYYY-MM-DD[ HH:MM[:SS]]`; a bare date means day-start (`*_after`) or day-end (`*_before`) |
+| `updated_after` / `updated_before` | string | same                                                                                           |
+| `visited_after` / `visited_before` | string | same, against `last_visited_at`                                                                |
+| `trashed_after` / `trashed_before` | string | same, only meaningful with `trash=true`                                                        |
+| `limit`, `offset`                  | int    | see pagination                                                                                 |
+| `cursor`                           | string | see pagination                                                                                 |
+
+Sorting: `created_at DESC` for active, `trashed_at DESC` for trash.
+
+### `POST /api/bookmarks` — create
+
+Body (`NewBookmark`); only `url` is required:
+
+```json
+{
+  "url": "https://example.com/",
+  "title": null,
+  "description": null,
+  "category": "Uncategorized",
+  "tags": [],
+  "keyword": null,
+  "note": null,
+  "favicon": null,
+  "thumbnail": null,
+  "favicon_mode": "auto",
+  "thumbnail_mode": "auto",
+  "starred": false,
+  "is_archived": false
+}
+```
+
+- `title` defaults to the URL. `category` defaults to `Uncategorized`.
+- `keyword` of `""` or null means "no keyword".
+- `favicon`/`thumbnail`: null = auto-resolve; `favicon: ""` forces the
+  generic domain favicon; `thumbnail: ""` stores none.
+- `favicon_mode`/`thumbnail_mode` are `"auto"` (default) | `"default"` |
+  `"fetch"` and win over the explicit fields when set. `auto` resolves
+  offline first and falls back to a network fetch only when a site fetcher
+  matches; `fetch` always goes to the network; `default` always uses the
+  generic icon.
+- `is_archived` defaults to false.
+
+Returns 201 with the hydrated `Bookmark` (tags and category resolved). A
+duplicate active URL is 409 `conflict_url`; a duplicate keyword is 409
+`conflict_keyword`.
+
+### `GET /api/bookmarks/{id}` — get
+
+200 + `Bookmark`, or 404.
+
+### `PUT /api/bookmarks/{id}` — update
+
+Tri-state semantics: `null` or absent field = leave unchanged. `tags` is a
+full replacement (empty array clears); `add_tags`/`remove_tags` patch
+incrementally. `keyword: ""` clears it. `refresh: true` re-fetches the
+favicon/thumbnail for this bookmark, bypassing the 90-day media cache (and
+rewriting it with the fresh result). `url` of `""` is a 400. Returns 200 +
+`Bookmark`; 404 if the id is gone; 409 on URL/keyword collisions.
+
+### `DELETE /api/bookmarks/{id}` — delete
+
+`?purge=true` permanently deletes; the default moves the bookmark to the
+trash. Returns 204, or 404.
+
+### `POST /api/bookmarks/{id}/restore` — restore
+
+Pulls a bookmark out of the trash. 204 on success, 404 if missing, 409 if
+restoring would collide with a live URL.
+
