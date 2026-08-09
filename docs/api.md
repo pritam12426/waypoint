@@ -213,3 +213,105 @@ trash. Returns 204, or 404.
 Pulls a bookmark out of the trash. 204 on success, 404 if missing, 409 if
 restoring would collide with a live URL.
 
+### `PATCH /api/bookmarks` — bulk update
+
+```json
+{ "ids": [1, 2, 3], "update": { "starred": true } }
+```
+
+`update` uses the same tri-state shape as the single update, but must
+contain at least one actual change. Returns:
+
+```json
+{ "updated": [1, 2], "skipped": [3] }
+```
+
+`skipped` is ids that are missing or trashed. Validation happens up front
+(an invalid payload writes nothing); a write-time collision aborts mid-batch
+with a 409.
+
+### `DELETE /api/bookmarks` — bulk delete
+
+Query-only, and it takes either an `ids=` comma-separated list **or** the
+filter criteria from the list endpoint — both or neither is a 400 (the
+catch-all refusal is intentional). `dry_run=true` returns the ids that
+_would_ be removed without removing them. Response:
+
+```json
+{ "ids": [4, 5], "removed": 2 }
+```
+
+### `DELETE /api/trash` — empty trash
+
+`?before=YYYY-MM-DD` limits the purge to bookmarks trashed at or before that
+time; `?dry_run=true` previews. Response is the same `{ ids, removed }`
+shape.
+
+## Categories and tags
+
+- `GET /api/categories` → array of `{ "id", "name" }`.
+- `PUT /api/categories/{id}` body `{ "name": "..." }` — renaming the default
+  category is a 400.
+- `DELETE /api/categories/{id}` → 204; the category's bookmarks move to the
+  default category.
+- `GET /api/tags` → array of `{ "name", "count" }` (cached, see below).
+- `PUT /api/tags/{name}` body `{ "name": "..." }` → 200.
+- `DELETE /api/tags/{name}` → 204; associations are dropped.
+
+`GET /api/tags` and every `/api/stats*` response carry
+`Cache-Control: private, max-age=30` and a strong `ETag`, and answer 304
+when `If-None-Match` matches.
+
+## Search
+
+`GET /api/search?q=...` — matches title, description, note, and URL, using
+FTS5 ranking (best matches first). Supports `category`, `tag`, `keyword`
+narrowing, `limit` (default 50, max 1000), and `archived` (default false;
+searches the separate archive index). Returns a bare array of `Bookmark`
+plus `x-total-count`. There is no offset or cursor on search — for deep
+paging you're expected to narrow the query.
+
+## Import and export
+
+### `POST /api/import`
+
+Body (`camelCase`):
+
+```json
+{ "content": "<netscape html>", "tags": ["bulk"], "category": null, "archive": false }
+```
+
+Parses a Netscape/HTML bookmark file (every major browser's export format).
+`<H3>` folder headings become categories; a bookmark ends up tagged with the
+folder it appeared under. `tags` adds tags to every imported bookmark,
+`category` overrides the folder headings for all of them, and `archive`
+sends everything to the archive. Duplicate URLs are skipped, not
+double-created — imports funnel through the same `insert` as the API.
+
+Response:
+
+```json
+{ "imported": 41, "skipped": 3 }
+```
+
+### `GET /api/export`
+
+`?format=md` (default) or `?format=csv`. The response body is the raw
+document text (`Content-Type: text/markdown` or `text/csv`) — no JSON
+wrapper, no file download:
+
+```text
+# Bookmarks
+
+## Uncategorized
+- [Example](https://example.com/) `ex` #dev
+  the description
+```
+
+Markdown groups by category; CSV is flat with the header
+`id,title,url,description,category,tags,keyword,note,favicon,starred`. Only
+**active** bookmarks are exported — trashed and archived stay out of backups
+by default.
+
+## Dead-link check
+
