@@ -315,3 +315,108 @@ by default.
 
 ## Dead-link check
 
+### `POST /api/check`
+
+```json
+{ "delete": false, "hardDelete": false, "jobs": 4 }
+```
+
+`delete` moves dead links to the trash; `hardDelete` purges them; both at
+once is a 400. `jobs` is worker threads (defaults to the CPU count, clamped
+≥ 1). The run happens in the background. Returns **202**:
+
+```json
+{ "id": 1 }
+```
+
+### `GET /api/check/{id}`
+
+Polls the job. The response is a tagged enum:
+
+```json
+{ "status": "running", "checked": 30, "total": 41, "dead": 1 }
+```
+
+```json
+{
+  "status": "finished",
+  "checked": 41,
+  "alive": 39,
+  "skipped": 1,
+  "deleted": 1,
+  "dead": [{ "id": 5, "title": "...", "url": "...", "reason": "HTTP 404" }]
+}
+```
+
+```json
+{ "status": "failed", "error": "..." }
+```
+
+### `GET /api/bookmarks/{id}/check`
+
+Synchronous single-link check — no job to poll. Probes just that bookmark
+and returns its verdict directly (up to the same 10-second probe budget):
+
+```json
+{ "status": "alive" }
+```
+
+```json
+{ "status": "dead", "reason": "HTTP 404" }
+```
+
+```json
+{ "status": "skipped" }
+```
+
+`skipped` covers non-http(s) URLs. A nonexistent or **trashed** bookmark is
+a 404 — like the batch job, this only checks active bookmarks.
+
+Liveness: any 2xx/3xx counts as alive (redirects are followed). HEAD is
+tried first, and a HEAD rejected with 405/501 is retried with GET — HEAD is
+optional per RFC 7231. Timeouts, DNS failures, connection errors, and
+4xx/5xx are all dead. Non-http(s) URLs (`mailto:` etc.) are counted in
+`skipped` and never probed. Each probe has a fixed 10-second budget.
+`reason` is `HTTP <code>`, `timed out`, or the underlying error text.
+
+Probes share the media fetch engine's SSRF guard: loopback, private,
+link-local, and unique-local destinations are refused outright (reported
+dead) so a saved URL can never make the checker reach internal hosts. This
+also means a bookmark pointing at a LAN address like `192.168.x.x` or
+`127.0.0.1` is always dead.
+
+Jobs live only in process memory: ids are monotonic from 1, a poll on a
+missing id is 404, and finished jobs are reaped after an hour. Restart the
+server and in-flight checks are simply gone.
+
+## Stats
+
+All paged stats endpoints take `limit` + `offset`; defaults are in the
+table. They're all cached 30s as described above.
+
+| endpoint                        | default limit | returns                                                                                               |
+| ------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `GET /api/stats`                | —             | overview (below)                                                                                      |
+| `GET /api/stats/domains`        | 50            | `{ "domain", "count" }[]`                                                                             |
+| `GET /api/stats/tags`           | 50            | `{ "name", "count" }[]`                                                                               |
+| `GET /api/stats/bookmarks/{id}` | —             | a single `Bookmark`                                                                                   |
+| `GET /api/stats/top-visited`    | 20            | `{ "domain", "total_visits", "bookmark_count" }[]`                                                    |
+| `GET /api/stats/never-visited`  | 50            | `{ "id", "title", "url", "domain", "created_at" }[]`                                                  |
+| `GET /api/stats/orphan-tags`    | 50            | `{ "name", "bookmark_id", "bookmark_title" }[]` (tags that exist only because a bookmark was deleted) |
+| `GET /api/stats/hygiene`        | —             | `{ "total", "missing_tags", "missing_note", "missing_description" }`                                  |
+| `GET /api/stats/activity`       | 12            | `{ "month": "YYYY-MM", "count" }[]`, most recent first                                                |
+
+The overview:
+
+```json
+{
+  "total": 12, "starred": 3, "archived": 1, "trashed": 2,
+  "categories":  [{ "name": "Uncategorized", "count": 9 }],
+  "top_domains": [{ "domain": "example.com", "count": 4 }],
+  "top_tags":    [{ "name": "dev", "count": 5 }],
+  "most_visited": [ { "id": 1, "title": "...", "url": "...", "domain": "example.com",
+                       "visit_count": 21, "last_visited_at": "...", "created_at": "..." } ],
+  "recently_added": [ /* same shape */ ]
+}
+```
+
