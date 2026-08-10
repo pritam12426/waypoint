@@ -420,3 +420,17 @@ The overview:
 }
 ```
 
+## The non-API routes
+
+- `GET /keywords` — one keyword per line, active non-archived bookmarks
+  only (empty string for bookmark-without-keyword), plain text.
+- `GET /keywords/{keyword}` — 307 redirect to the URL, recording a visit
+  fire-and-forget first. Unknown keyword → a plain-text 404 (this route is
+  outside `/api`, so it doesn't use the JSON error contract).
+- `GET /open/{id}` — same redirect by id, same visit recording, same
+  plain-text 404.
+- everything else — the static frontend (`/` maps to `index.html`, unknown
+  paths fall back to `index.html`). The `/api` nest has its own fallback
+  that returns a JSON 404 instead of the SPA, so a typo'd endpoint doesn't
+  silently serve HTML. Path-traversal attempts on static assets are
+  rejected at 404.
