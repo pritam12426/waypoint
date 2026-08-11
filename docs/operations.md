@@ -106,3 +106,32 @@ transient batch runs: ids restart from 1 on every boot, finished jobs are
 reaped after an hour, and a crashed server simply loses in-flight checks.
 If you need a check to survive a restart, run it again after.
 
+## Backing up
+
+The database is a single SQLite file, so a backup is a copy — with one
+caveat. WAL means the live database has `-wal` and `-shm` sidecars; copying
+just the main file while the server is running can miss the most recent
+commits. The clean way to take a hot backup:
+
+```
+sqlite3 waypoint.sqlite "PRAGMA wal_checkpoint(TRUNCATE);"
+cp waypoint.sqlite backup.sqlite
+```
+
+or stop the server first (graceful shutdown checkpoints the WAL
+automatically). The `-wal`/`-shm` files are transient and must never be
+committed or backed up on their own. The media cache in
+`~/.cache/waypoint/` is a cache — it can be copied for warmth or omitted
+entirely.
+
+## Sizing and resource notes
+
+A release build is a single stripped binary, small enough to forget about
+(size optimization is a stated goal — `opt-level = "s"`, fat LTO, strip;
+see `Cargo.toml`). At runtime SQLite maps up to 256 MiB of the file read-only
+and holds ~32 MiB of page cache. The one number that actually scales with
+your collection is the media cache, which is bounded at 10,000 entries. A
+list page beyond a few thousand bookmarks is where the keyset cursor in
+`api.md` earns its keep — offset pagination on the default `created_at`
+ordering works, but the cursor stays O(page) instead of scanning past
+everything you've already seen.
