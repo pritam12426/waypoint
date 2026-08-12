@@ -103,3 +103,28 @@ after the current max) and one entry in the `MIGRATIONS` array in
 legacy-upgrade path runs fresh and legacy databases through the same batch.
 There's no rollback file; down migrations are a deliberate non-feature.
 
+## Things that look like bugs but aren't
+
+- **`src/logging/` has dead code on purpose.** `next_request_id`,
+  `log_set_level`/`log_get_level`, `log_use_color`, `truncate_for_log` are
+  present-but-unused infrastructure. Clippy warns on them; don't delete
+  them, and don't add `#[allow]`s that silence anything else.
+- **Logging macros are exported from the library.** In `main.rs` (the
+  binary), call them as `waypointd::log_debug!(...)`, not
+  `crate::log_debug!(...)`.
+- **The HTTP headers `x-total-count`, `x-next-cursor`, and
+  `x-waypoint-error` are lowercase by design.** axum 0.8 doesn't normalize
+  header names, and a capital-letter variant becomes a separate, ignored
+  header. Keep the `HeaderName::from_static` values lowercase.
+- **`database::bookmarks::count` must mirror `list` exactly.** Same filter
+  → same WHERE clause. If one changes and the other doesn't, `x-total-count`
+  drifts from the actual array length.
+- **"Duplicate URL" is a friendly error, not a raw constraint.** `insert`
+  pre-checks and bails with the "already exists as bookmark" message, and
+  `http::error` special-cases that text into the 409 `conflict_url`
+  contract. Keep the two in sync.
+- **`utoipa`'s feature flag is `macros`, not `derive`.** The `derive`
+  feature does not exist and produces a confusing compile error. Don't
+  re-add the `utoipa-swagger-ui` crate either — the vendored UI shipped
+  ~5 MiB of embedded assets. The interactive UI at `/api/docs` is a CDN
+  HTML shell (see `src/http/docs.rs`); keep it dependency-free.
