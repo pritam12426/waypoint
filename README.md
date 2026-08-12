@@ -105,3 +105,78 @@ For day-to-day development the server runs from `cargo run` (API on
   `Idempotency-Key` support on mutating endpoints so a retried create
   can't silently double-save.
 
+## Honest limits
+
+A few things are simpler than a hosted service, on purpose, and worth
+knowing before you rely on them:
+
+- **Check jobs are in-memory.** `POST /api/check` results die with the
+  process; ids restart from 1 on every boot. If a dead-link check has to
+  survive a restart, run it again after.
+- **Auth is token-based only.** No user accounts, no roles, no audit log.
+  Two tokens, both optional, both bearer-style.
+- **One database, one server.** It's built for a personal collection, not
+  a multi-tenant deployment.
+
+## Configuration
+
+Every knob is a `WAYPOINTD_*` environment variable. There is no config
+file, no CLI flags, no dotenv. Read at startup, so a change means a
+restart. Here is every variable the program reads.
+
+### Server
+
+| variable                  | default                                       | meaning                                                                                                                                       |
+| ------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WAYPOINTD_DB_FILE`       | `waypoint.sqlite`                             | Where the SQLite database lives.                                                                                                              |
+| `WAYPOINTD_SERVE_HOST`    | `localhost`                                   | The address to bind. `localhost` on purpose — change it only if you really want it reachable beyond this machine.                             |
+| `WAYPOINTD_SERVE_PORT`    | `8080`                                        | The port to listen on.                                                                                                                        |
+| `WAYPOINTD_COOKIE_SECURE` | `false`                                       | Set `true` to tag the session cookie with `Secure`. Default is fine for plain-HTTP self-hosting; set it when serving over TLS behind a proxy. |
+| `WAYPOINTD_CACHE_DIR`     | platform cache dir (e.g. `~/.cache` on Linux) | Directory for the fetched-media cache (favicons/thumbnails). Falls back to the OS default when unset.                                         |
+
+### Auth
+
+| variable                | default   | meaning                                                                                                                  |
+| ----------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `WAYPOINTD_SERVE_TOKEN` | _(unset)_ | When set, every `/api/*` request (and the docs) needs `Authorization: Bearer <token>`. An empty value means auth is off. |
+| `WAYPOINTD_READ_TOKEN`  | _(unset)_ | A second, read-only token: grants GET/HEAD only. Ignored if the serve token isn't set.                                   |
+
+### Operations
+
+| variable                         | default         | meaning                                                                                    |
+| -------------------------------- | --------------- | ------------------------------------------------------------------------------------------ |
+| `WAYPOINTD_WAL_CHECKPOINT_SECS`  | `60`            | Seconds between periodic WAL checkpoints. `0` disables the background task.                |
+| `WAYPOINTD_REQUEST_TIMEOUT_SECS` | `30`            | Per-request deadline (queue wait + handler) before the server answers 504.                 |
+| `WAYPOINTD_MAX_CONCURRENCY`      | `64`            | Cap on concurrently-executing API requests; saturation answers 503. Clamped to at least 1. |
+| `WAYPOINTD_BACKUP_DIR`           | _(unset)_       | Directory for automated `VACUUM INTO` snapshots. Unset means no backups.                   |
+| `WAYPOINTD_BACKUP_INTERVAL_SECS` | `86400` (daily) | How often automated backups run.                                                           |
+| `WAYPOINTD_BACKUP_KEEP`          | `7`             | How many backups to retain before pruning the oldest. Clamped to at least 1.               |
+
+### Logging
+
+| variable               | default          | meaning                                                                              |
+| ---------------------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `WAYPOINTD_LOG_LEVEL`  | `info`           | One of `off`, `fatal`, `error`, `warn`, `info`, `debug`, `trace`.                    |
+| `WAYPOINTD_LOG_FORMAT` | `human-readable` | `human-readable` (colourized on a TTY) or `json` for piping into `jq`/a log shipper. |
+| `WAYPOINTD_LOG_FILE`   | stderr           | Where logs go. Set a path to write to a file instead.                                |
+
+### Frontend build-time
+
+| variable        | default | meaning                                                                               |
+| --------------- | ------- | ------------------------------------------------------------------------------------- |
+| `VITE_API_BASE` | `""`    | Optional API base URL baked into the SPA at build time (defaults to the same origin). |
+
+The full reference for the docs, headers, error codes, and the media cache
+lives in `docs/` — `docs/operations.md` is the natural next read.
+
+## Where to look
+
+- [docs/architecture.md](docs/architecture.md) — crate layout and the threading model.
+- [docs/api.md](docs/api.md) — every endpoint, auth, pagination, error codes.
+- [docs/database.md](docs/database.md) — schema, migrations, full-text search, WAL.
+- [docs/operations.md](docs/operations.md) — env vars, logging, media cache, backups.
+- `frontend/` — the React 19 / Vite / TanStack Router SPA.
+
+## License
+
+[MIT](LICENSE) — see `LICENSE`.
