@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use axum::{
 	body::Body,
 	extract::{ConnectInfo, State},
-	http::{StatusCode, Uri, header},
+	http::{HeaderName, StatusCode, Uri, header},
 	response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -33,13 +33,20 @@ use crate::http::error::AppError;
 #[folder = "frontend/dist/"]
 struct Assets;
 
+/// Response header marking every response served from the embedded
+/// frontend. `http::log_request` reads it to log static file requests at
+/// `debug` instead of `info` — a page load spams the access log with tens
+/// of asset lines, and the info level is meant for API traffic. Deliberately
+/// lowercase (axum 0.8 does not normalize header names).
+pub const X_WAYPOINT_STATIC: HeaderName = HeaderName::from_static("x-waypoint-static");
+
 /// Serves the frontend. Route order means this is the fallback for anything
 /// not matched by `/api` or `/keywords` — including `/` itself.
 /// Fallback for the `/api` nest: an unmatched JSON route is a 404 in the
 /// same `{"error", "code"}` contract as every other API error, not the SPA
 /// fallback (which would hand the frontend an HTML document it can't parse).
 pub async fn api_404() -> AppError {
-	AppError::not_found("no such API endpoint")
+	AppError::not_found("no such API endpoint — check the path against the API docs")
 }
 
 pub async fn static_handler(
@@ -143,6 +150,9 @@ fn raw_response(status: StatusCode, mime: &str, body: Body) -> Response {
 	Response::builder()
 		.status(status)
 		.header(header::CONTENT_TYPE, mime)
+		// Tells `log_request` this was a static frontend file so it logs at
+		// debug instead of info.
+		.header(X_WAYPOINT_STATIC, "1")
 		.body(body)
 		.expect("static response headers are always valid")
 		.into_response()

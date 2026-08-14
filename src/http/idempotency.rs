@@ -135,7 +135,7 @@ pub async fn idempotency(State(state): State<AppState>, req: Request, next: Next
 	}
 	if key.len() > MAX_KEY_LEN {
 		let err = AppError::invalid_payload(format!(
-			"idempotency-key must be at most {MAX_KEY_LEN} characters"
+			"the idempotency-key header must be at most {MAX_KEY_LEN} characters"
 		));
 		return err.into_response();
 	}
@@ -171,7 +171,8 @@ pub async fn idempotency(State(state): State<AppState>, req: Request, next: Next
 		}
 		crate::log_warn!("idempotency: key {key:?} reused for a different request");
 		let err = AppError::replay_conflict(format!(
-			"idempotency-key {key:?} was already used for a different request"
+			"the idempotency-key {key:?} was already used for a different request; \
+			 use a fresh key per request"
 		));
 		return err.into_response();
 	}

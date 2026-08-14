@@ -91,7 +91,7 @@ pub fn validate_limit_with_default(limit: Option<i64>, default: i64) -> Result<i
 		None => Ok(default),
 		Some(l) if (1..=MAX_PAGE_SIZE).contains(&l) => Ok(l),
 		Some(l) => Err(format!(
-			"limit must be between 1 and {MAX_PAGE_SIZE}, got {l}"
+			"the limit must be between 1 and {MAX_PAGE_SIZE}, got {l}"
 		)),
 	}
 }
@@ -102,7 +102,7 @@ pub fn validate_offset(offset: Option<i64>) -> Result<i64, String> {
 	match offset {
 		None => Ok(0),
 		Some(o) if o >= 0 => Ok(o),
-		Some(o) => Err(format!("offset must be 0 or greater, got {o}")),
+		Some(o) => Err(format!("the offset must be 0 or greater, got {o}")),
 	}
 }
 
@@ -110,7 +110,9 @@ pub fn validate_offset(offset: Option<i64>) -> Result<i64, String> {
 /// `AUTOINCREMENT` and start at 1, so anything below 1 is a client error.
 pub fn validate_id(id: i64) -> Result<i64, String> {
 	if id < 1 {
-		Err(format!("id must be a positive integer, got {id}"))
+		Err(format!(
+			"the bookmark id must be a positive integer, got {id}"
+		))
 	} else {
 		Ok(id)
 	}
@@ -131,7 +133,7 @@ pub fn validate_id(id: i64) -> Result<i64, String> {
 /// one bound. Pairwise `after <= before` sanity lives in
 /// `validate_time_range`.
 pub fn parse_datetime_bound(input: &str, end_of_day: bool) -> Result<String, String> {
-	let err = || format!("expected YYYY-MM-DD[ HH:MM[:SS]] (UTC), got \"{input}\"");
+	let err = || format!("a date filter expects YYYY-MM-DD[ HH:MM[:SS]] (UTC), got \"{input}\"");
 	let trimmed = input.trim();
 	let (date, time) = match trimmed.find(' ') {
 		Some(idx) => (&trimmed[..idx], &trimmed[idx + 1..]),
@@ -213,7 +215,9 @@ pub fn validate_time_range(
 	if let (Some(a), Some(b)) = (after, before)
 		&& a > b
 	{
-		return Err(format!("{label} range: {a} is after {b}"));
+		return Err(format!(
+			"inverted {label} range: the after bound ({a}) is later than the before bound ({b})"
+		));
 	}
 	Ok(())
 }

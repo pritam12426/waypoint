@@ -1359,3 +1359,82 @@ async fn check_rejects_loopback_and_reports_dead_skipped_and_404() {
 	let res = get(dead_id).await;
 	assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn bookmark_note_returns_plain_text() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	async fn create(state: &AppState, body: serde_json::Value) -> i64 {
+		let res = request(
+			state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(body.to_string()),
+		)
+		.await;
+		assert_eq!(res.status(), StatusCode::CREATED);
+		let json: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+		json["id"].as_i64().unwrap()
+	}
+
+	// A bookmark with a note returns it verbatim, as text/plain.
+	let with_note = create(
+		&state,
+		json!({ "url": "https://a.example/noted", "note": "keep it short\nsecond line" }),
+	)
+	.await;
+	let res = request(
+		&state,
+		Method::GET,
+		&format!("/api/bookmarks/{with_note}/note"),
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(
+		res.headers().get(header::CONTENT_TYPE).unwrap(),
+		"text/plain; charset=utf-8"
+	);
+	assert_eq!(body_text(res).await, "keep it short\nsecond line");
+
+	// A bookmark with no note answers 200 with an empty body (it exists,
+	// the note is just empty) — not a 404.
+	let no_note = create(&state, json!({ "url": "https://b.example/plain" })).await;
+	let res = request(
+		&state,
+		Method::GET,
+		&format!("/api/bookmarks/{no_note}/note"),
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	assert_eq!(body_text(res).await, "");
+
+	// Unknown ids are a 404.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks/99999/note",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+	// So are trashed bookmarks — the note read only covers active ones.
+	request(
+		&state,
+		Method::DELETE,
+		&format!("/api/bookmarks/{with_note}"),
+		Body::empty(),
+	)
+	.await;
+	let res = request(
+		&state,
+		Method::GET,
+		&format!("/api/bookmarks/{with_note}/note"),
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

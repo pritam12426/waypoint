@@ -121,13 +121,15 @@ pub async fn list_bookmarks(
 		Some(token) => {
 			if q.trash.unwrap_or(false) {
 				return Err(AppError::invalid_limit(
-					"cursor pagination is only valid for the active list",
+					"cursor pagination only applies to the active list, not the trash",
 				));
 			}
 			match cursor::decode_cursor(&token) {
 				Some(bound) => Some(bound),
 				None => {
-					return Err(AppError::invalid_limit("invalid cursor token"));
+					return Err(AppError::invalid_limit(
+						"invalid cursor token; pass the x-next-cursor value unchanged",
+					));
 				}
 			}
 		}
@@ -317,7 +319,9 @@ pub async fn create_bookmark(
 	// URL is the only truly required field on `NewBookmark`; validate it
 	// and the (optional) keyword before touching the database.
 	if new.url.trim().is_empty() {
-		return Err(AppError::invalid_url("url is required"));
+		return Err(AppError::invalid_url(
+			"a url is required to create a bookmark",
+		));
 	}
 	validate_keyword(new.keyword.as_deref())?;
 
@@ -377,7 +381,45 @@ pub async fn get_bookmark(
 	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
 	match bookmark {
 		Some(b) => Ok(Json(b).into_response()),
-		None => Err(AppError::not_found("bookmark not found")),
+		None => Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		))),
+	}
+}
+
+/// The note of one bookmark, as plain text. The note is optional, so a
+/// bookmark with a null/empty note answers 200 with an empty body — the
+/// caller asked for a *note* by bookmark id, and the bookmark exists. Only a
+/// missing (or trashed, which is invisible to `get`) bookmark is a 404.
+#[utoipa::path(
+	get,
+	path = "/api/bookmarks/{id}/note",
+	tag = "bookmarks",
+	params(("id" = i64, Path, description = "Bookmark id")),
+	responses(
+		(status = 200, description = "The bookmark note as plain text", content_type = "text/plain", body = String),
+		(status = 400, description = "Invalid id", body = ApiErrorBody),
+		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
+	)
+)]
+pub async fn get_note(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+	crate::log_debug!("{addr} GET /api/bookmarks/{id}/note");
+	validate_id(id)?;
+	let db = state.db.clone();
+	let bookmark = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
+	match bookmark {
+		Some(b) => Ok((
+			[(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+			b.note.unwrap_or_default(),
+		)
+			.into_response()),
+		None => Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		))),
 	}
 }
 
@@ -406,7 +448,9 @@ pub async fn update_bookmark(
 	// Partial-update contract: an empty-string URL means "clear it", which
 	// is invalid; a `None` URL means "unchanged".
 	if update.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
-		return Err(AppError::invalid_url("url cannot be empty"));
+		return Err(AppError::invalid_url(
+			"the url cannot be emptied; remove the bookmark instead",
+		));
 	}
 	validate_keyword(update.keyword.as_deref())?;
 
@@ -415,7 +459,9 @@ pub async fn update_bookmark(
 	let db = state.db.clone();
 	let existing = tokio::task::spawn_blocking(move || bm_db::get(&db.reader(), id)).await??;
 	let Some(existing) = existing else {
-		return Err(AppError::not_found("bookmark not found"));
+		return Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		)));
 	};
 
 	// Duplicate checks and media resolution (potentially network I/O) run
@@ -447,7 +493,9 @@ pub async fn update_bookmark(
 	.await??;
 
 	let Some(existing) = existing else {
-		return Err(AppError::not_found("bookmark not found"));
+		return Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		)));
 	};
 	state.refresh_caches().await;
 	// `describe` diffs the pre-update bookmark against the request so the
@@ -511,7 +559,9 @@ pub async fn delete_bookmark(
 	Ok(if removed {
 		StatusCode::NO_CONTENT.into_response()
 	} else {
-		return Err(AppError::not_found("bookmark not found"));
+		return Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		)));
 	})
 }
 
@@ -542,7 +592,9 @@ pub async fn restore_bookmark(
 		crate::log_info!("{addr} restored bookmark #{id}");
 		StatusCode::NO_CONTENT.into_response()
 	} else {
-		return Err(AppError::not_found("bookmark not found"));
+		return Err(AppError::not_found(format!(
+			"bookmark #{id} is not in the trash (or does not exist)"
+		)));
 	})
 }
 
@@ -625,7 +677,7 @@ pub async fn bulk_delete_bookmarks(
 			.map(|part| {
 				let id = part
 					.parse::<i64>()
-					.map_err(|_| AppError::invalid_id(format!("invalid bookmark id: {part}")))?;
+					.map_err(|_| AppError::invalid_id(format!("{part:?} is not a bookmark id")))?;
 				validate_id(id)
 			})
 			.collect::<Result<Vec<_>, AppError>>()?,
@@ -654,13 +706,13 @@ pub async fn bulk_delete_bookmarks(
 
 	if ids.is_empty() && !has_criteria {
 		return Err(AppError::invalid_limit(
-			"bulk delete needs ids or at least one filter criterion \
-			 (refusing a catch-all)",
+			"bulk delete needs either an ids list or at least one filter \
+			 criterion (a catch-all delete is refused)",
 		));
 	}
 	if !ids.is_empty() && has_criteria {
 		return Err(AppError::invalid_limit(
-			"bulk delete accepts either an ids list or filter criteria, not both",
+			"bulk delete takes an ids list or filter criteria, never both",
 		));
 	}
 
@@ -804,11 +856,13 @@ pub async fn bulk_update_bookmarks(
 	// Same gates as the single-update handler, before any id is touched.
 	if !update.has_any_change() {
 		return Err(AppError::invalid_payload(
-			"bulk update has nothing to change",
+			"bulk update must change at least one field",
 		));
 	}
 	if update.url.as_deref().is_some_and(|u| u.trim().is_empty()) {
-		return Err(AppError::invalid_url("url cannot be empty"));
+		return Err(AppError::invalid_url(
+			"the url cannot be emptied; remove the bookmarks instead",
+		));
 	}
 	validate_keyword(update.keyword.as_deref())?;
 

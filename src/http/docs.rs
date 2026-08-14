@@ -88,6 +88,7 @@ const DOCS_UI_HTML: &str = r##"<!DOCTYPE html>
 		list_bookmarks,
 		create_bookmark,
 		get_bookmark,
+		get_note,
 		update_bookmark,
 		delete_bookmark,
 		bulk_delete_bookmarks,

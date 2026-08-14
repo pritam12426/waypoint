@@ -67,7 +67,9 @@ pub async fn import_bookmarks(
 	Json(body): Json<ImportRequest>,
 ) -> Result<Json<ImportResult>, AppError> {
 	if body.content.trim().is_empty() {
-		return Err(AppError::invalid_payload("import content cannot be empty"));
+		return Err(AppError::invalid_payload(
+			"import content is empty; send a Netscape bookmark export to import",
+		));
 	}
 	crate::log_debug!("{addr} POST /api/import ({} bytes)", body.content.len());
 	let db = state.db.clone();
@@ -126,7 +128,7 @@ pub async fn export_bookmarks(
 		"csv" => "csv",
 		other => {
 			return Err(AppError::invalid_payload(format!(
-				"unsupported export format {other:?}: use md or csv"
+				"unsupported export format {other:?}; use md or csv"
 			)));
 		}
 	};

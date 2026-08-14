@@ -120,7 +120,9 @@ pub async fn stats_bookmark_detail(
 		tokio::task::spawn_blocking(move || bm_db::get_by_ids(&db.reader(), &[id])).await??;
 	match bookmarks.into_iter().next() {
 		Some(b) => Ok(Json(b)),
-		None => Err(AppError::not_found("bookmark not found")),
+		None => Err(AppError::not_found(format!(
+			"bookmark #{id} does not exist (or has been trashed)"
+		))),
 	}
 }
 

@@ -150,13 +150,16 @@ pub async fn require_api_token(
 
 	let Some(scope) = scope else {
 		crate::log_debug!("auth: rejecting request (missing or invalid token)");
-		return Err(AppError::unauthorized("invalid or missing API token"));
+		return Err(AppError::unauthorized(
+			"this endpoint needs an API token: send it as a Bearer token or \
+			 sign in with one first",
+		));
 	};
 
 	if !scope.allows(req.method()) {
 		crate::log_debug!("auth: read-only token rejected {} request", req.method());
 		return Err(AppError::forbidden(
-			"read-only token cannot perform this request",
+			"this token is read-only and cannot perform mutating requests",
 		));
 	}
 

@@ -91,7 +91,7 @@ pub async fn start_check(
 ) -> Result<(StatusCode, Json<CheckStarted>), AppError> {
 	if body.delete && body.hard_delete {
 		return Err(AppError::invalid_payload(
-			"delete and hardDelete are mutually exclusive",
+			"delete and hardDelete are mutually exclusive; pick one",
 		));
 	}
 	let jobs = body.jobs.unwrap_or_else(default_check_jobs).max(1);
@@ -151,7 +151,9 @@ pub async fn check_status(
 	Path(id): Path<u64>,
 ) -> Result<Json<CheckStatus>, AppError> {
 	let Some(job) = state.jobs.get(id) else {
-		return Err(AppError::not_found(format!("no such check job {id}")));
+		return Err(AppError::not_found(format!(
+			"no check job with id {id} (it may have finished long ago and been reaped)"
+		)));
 	};
 	let status = match job.snapshot() {
 		CheckJobState::Running {
@@ -207,7 +209,9 @@ pub async fn check_one_bookmark(
 		tokio::task::spawn_blocking(move || checker::check_one(&db.reader(), id)).await??;
 	match verdict {
 		Some(v) => Ok(Json(v)),
-		None => Err(AppError::not_found(format!("no such active bookmark {id}"))),
+		None => Err(AppError::not_found(format!(
+			"no active bookmark #{id} to check (it may be trashed)"
+		))),
 	}
 }
 

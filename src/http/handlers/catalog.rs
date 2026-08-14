@@ -81,7 +81,7 @@ pub async fn rename_category(
 	let id = validate_id(id)?;
 	let name = body.name.trim();
 	if name.is_empty() {
-		return Err(AppError::invalid_name("category name cannot be empty"));
+		return Err(AppError::invalid_name("a category needs a non-empty name"));
 	}
 	let db = state.db.clone();
 	let db2 = db.clone();
@@ -89,7 +89,7 @@ pub async fn rename_category(
 		tokio::task::spawn_blocking(move || cat_db::is_default(&db.reader(), id)).await??;
 	if is_default {
 		return Err(AppError::invalid_name(
-			"the default category cannot be renamed",
+			"the default category cannot be renamed (bookmarks land there when you delete a category)",
 		));
 	}
 	let name = name.to_string();
@@ -100,7 +100,9 @@ pub async fn rename_category(
 		state.refresh_caches().await;
 		Ok(StatusCode::OK)
 	} else {
-		Err(AppError::not_found("category not found"))
+		Err(AppError::not_found(format!(
+			"category #{id} does not exist"
+		)))
 	}
 }
 
@@ -129,7 +131,7 @@ pub async fn delete_category(
 		tokio::task::spawn_blocking(move || cat_db::is_default(&db.reader(), id)).await??;
 	if is_default {
 		return Err(AppError::invalid_name(
-			"the default category cannot be deleted",
+			"the default category cannot be deleted (its bookmarks would have nowhere to go)",
 		));
 	}
 	let deleted = tokio::task::spawn_blocking(move || cat_db::delete(&db2.writer(), id)).await??;
@@ -138,7 +140,9 @@ pub async fn delete_category(
 		state.refresh_caches().await;
 		Ok(StatusCode::NO_CONTENT)
 	} else {
-		Err(AppError::not_found("category not found"))
+		Err(AppError::not_found(format!(
+			"category #{id} does not exist"
+		)))
 	}
 }
 
@@ -190,7 +194,7 @@ pub async fn rename_tag(
 ) -> Result<StatusCode, AppError> {
 	crate::log_debug!("{addr} PUT /api/tags/{}", old_name);
 	if body.name.trim().is_empty() {
-		return Err(AppError::invalid_name("tag name cannot be empty"));
+		return Err(AppError::invalid_name("a tag needs a non-empty name"));
 	}
 	let db = state.db.clone();
 	let old = old_name.clone();
@@ -202,7 +206,9 @@ pub async fn rename_tag(
 		state.refresh_caches().await;
 		Ok(StatusCode::OK)
 	} else {
-		Err(AppError::not_found("tag not found"))
+		Err(AppError::not_found(format!(
+			"tag {old_name:?} does not exist"
+		)))
 	}
 }
 
@@ -232,7 +238,7 @@ pub async fn delete_tag(
 		state.refresh_caches().await;
 		Ok(StatusCode::NO_CONTENT)
 	} else {
-		Err(AppError::not_found("tag not found"))
+		Err(AppError::not_found(format!("tag {name:?} does not exist")))
 	}
 }
 
@@ -279,7 +285,7 @@ pub async fn search_bookmarks(
 	let query = q.q.as_deref().map(str::trim).unwrap_or("");
 	if query.is_empty() {
 		return Err(AppError::query_required(
-			"q is required (the text to search for)",
+			"a search needs q (the text to search for)",
 		));
 	}
 	let limit = validate_stats_limit(q.limit, 50)?;

@@ -46,7 +46,8 @@ pub struct BackupResult {
 pub async fn admin_backup(State(state): State<AppState>) -> Result<Json<BackupResult>, AppError> {
 	let Some(backup) = &state.backup else {
 		return Err(AppError::invalid_payload(
-			"no backup directory configured (set WAYPOINTD_BACKUP_DIR)",
+			"manual backups are disabled: start the server with WAYPOINTD_BACKUP_DIR \
+			 to point at a backup folder",
 		));
 	};
 	let now = chrono::Local::now();

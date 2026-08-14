@@ -63,6 +63,16 @@ happen to use.
 | `conflict_keyword` | 409    | keyword already in use by another active bookmark                                               |
 | `internal_error`   | 500    | never leaks details — message is always "internal server error", the real cause goes to the log |
 
+The `error` string is written for humans: it names the offending id, quotes
+the bad value, and suggests the fix ("a url is required to create a
+bookmark", "bookmark #12 does not exist (or has been trashed)", "delete and
+hardDelete are mutually exclusive; pick one"). The two 409 cases read
+unmistakably different: a URL collision says "URL already exists as bookmark
+#5 (…)" and points at the live owner, while a keyword collision says
+"keyword "x" already in use by bookmark #5 (…)" and tells you to pick a
+different keyword or leave it empty. Treat `error` as display text, not
+something to branch on — switch on `code` for logic.
+
 409s and 500s are classified from the underlying error message inside
 `src/http/error.rs`; the blanket rule is: message mentions "already exists
 as bookmark" → `conflict_url`, "already in use by bookmark" →
@@ -193,6 +203,13 @@ duplicate active URL is 409 `conflict_url`; a duplicate keyword is 409
 ### `GET /api/bookmarks/{id}` — get
 
 200 + `Bookmark`, or 404.
+
+### `GET /api/bookmarks/{id}/note` — get note
+
+Returns the bookmark's note verbatim as `text/plain; charset=utf-8`. A
+bookmark with no note (NULL or empty) answers 200 with an empty body — the
+bookmark exists, the note is just empty. 404 if the bookmark is missing or
+trashed. Convenient for piping to a file: `waypoint note 5 > notes/5.md`.
 
 ### `PUT /api/bookmarks/{id}` — update
 

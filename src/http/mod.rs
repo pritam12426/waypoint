@@ -66,6 +66,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use docs::{serve_docs_ui, serve_openapi};
 use error::X_WAYPOINT_ERROR;
+use handlers::X_WAYPOINT_STATIC;
 
 /// Ceiling on JSON request bodies (bookmark payloads, imports, checks).
 const BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
@@ -382,7 +383,9 @@ async fn shutdown_signal() {
 /// logs its own rejection with the error code + message. This middleware
 /// records an `info` line for every request (method, path, status,
 /// elapsed) — the request-level access log, visible at the default `info`
-/// level — and picks up the *other* ways a request goes unfulfilled —
+/// level; static frontend file requests are logged at `debug` instead so a
+/// page load doesn't drown out API traffic. It also picks up the *other*
+/// ways a request goes unfulfilled —
 /// axum extractor rejections (malformed JSON body, bad query string,
 /// unparseable path segment), missing static assets, and anything else
 /// that returns a 4xx/5xx without passing through `AppError`. The
@@ -403,7 +406,15 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
 	state
 		.metrics
 		.observe(method.as_str(), &path, status.as_u16(), elapsed);
-	crate::log_info!("{method} {path}: {status} in {elapsed:?}");
+	// Static frontend files (index.html, /assets/*, favicon.ico) get a debug
+	// line instead of info — a page load would otherwise spam the access log
+	// with tens of asset requests, burying the API traffic it's there to
+	// show. The marker header is set by the static handler.
+	if response.headers().contains_key(X_WAYPOINT_STATIC) {
+		crate::log_debug!("{method} {path}: {status} in {elapsed:?}");
+	} else {
+		crate::log_info!("{method} {path}: {status} in {elapsed:?}");
+	}
 	if (status.is_client_error() || status.is_server_error())
 		&& !response.headers().contains_key(X_WAYPOINT_ERROR)
 	{
@@ -425,7 +436,7 @@ async fn request_timeout(State(state): State<AppState>, req: Request, next: Next
 		Err(_) => {
 			crate::log_warn!("request timed out after {:?}", state.request_timeout);
 			error::AppError::timeout(format!(
-				"request exceeded the {:?} server deadline",
+				"request took longer than the server's {:?} deadline and was cancelled",
 				state.request_timeout
 			))
 			.into_response()
@@ -446,7 +457,8 @@ async fn concurrency_limit(State(state): State<AppState>, req: Request, next: Ne
 		}
 		Err(_) => {
 			crate::log_warn!("concurrency limit reached — rejecting request");
-			error::AppError::busy("server is at capacity, please retry shortly").into_response()
+			error::AppError::busy("the server is busy with other requests; try again in a moment")
+				.into_response()
 		}
 	}
 }
@@ -476,6 +488,7 @@ pub fn app(state: AppState) -> Router {
 		)
 		.route("/bookmarks/{id}/restore", post(handlers::restore_bookmark))
 		.route("/bookmarks/{id}/check", get(handlers::check_one_bookmark))
+		.route("/bookmarks/{id}/note", get(handlers::get_note))
 		.route("/trash", axum::routing::delete(handlers::empty_trash))
 		.route("/categories", get(handlers::list_categories))
 		.route(

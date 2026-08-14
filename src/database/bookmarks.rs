@@ -189,13 +189,21 @@ pub(crate) fn duplicate_error(
 	exclude_id: i64,
 ) -> anyhow::Error {
 	match find_url_owner(conn, url, exclude_id) {
-		Ok(Some((id, title))) => anyhow::anyhow!("URL already exists as bookmark #{id} ({title})"),
+		Ok(Some((id, title))) => anyhow::anyhow!(
+			"URL already exists as bookmark #{id} ({title}) — you can't save the same URL \
+			 twice; open bookmark #{id} to view or edit it"
+		),
 		_ => match keyword.and_then(|k| find_keyword_owner(conn, k, exclude_id).ok().flatten()) {
 			Some((id, title)) => anyhow::anyhow!(
-				"keyword \"{}\" already in use by bookmark #{id} ({title})",
+				"keyword \"{}\" already in use by bookmark #{id} ({title}) — pick a different \
+				 keyword or leave it empty",
 				keyword.unwrap_or_default()
 			),
-			None => anyhow::anyhow!("a bookmark with this URL or keyword already exists"),
+			None => anyhow::anyhow!(
+				"a bookmark with this URL or keyword already exists (a concurrent save may \
+				 have just landed); trashed copies don't count — restore or purge the \
+				 conflicting one first"
+			),
 		},
 	}
 }
@@ -226,13 +234,17 @@ pub fn check_insert_collisions(conn: &Connection, new: &NewBookmark) -> Result<(
 	// Only *active* rows collide — a trashed bookmark with the same URL or
 	// keyword never blocks re-adding it (partial unique indexes).
 	if let Some((existing_id, existing_title)) = find_url_owner(conn, &new.url, -1)? {
-		anyhow::bail!("URL already exists as bookmark #{existing_id} ({existing_title})");
+		anyhow::bail!(
+			"URL already exists as bookmark #{existing_id} ({existing_title}) — you can't \
+			 save the same URL twice; open bookmark #{existing_id} to view or edit it"
+		);
 	}
 	if let Some(keyword) = keyword.as_deref()
 		&& let Some((existing_id, existing_title)) = find_keyword_owner(conn, keyword, -1)?
 	{
 		anyhow::bail!(
-			"keyword \"{keyword}\" already in use by bookmark #{existing_id} ({existing_title})"
+			"keyword \"{keyword}\" already in use by bookmark #{existing_id} ({existing_title}) \
+			 — pick a different keyword or leave it empty"
 		);
 	}
 	Ok(())
@@ -660,7 +672,10 @@ pub fn check_update_collisions(
 			&update.url.clone().unwrap_or_else(|| existing.url.clone()),
 			id,
 		)? {
-		anyhow::bail!("URL already exists as bookmark #{other_id} ({other_title})");
+		anyhow::bail!(
+			"URL already exists as bookmark #{other_id} ({other_title}) — you can't save the \
+			 same URL twice; open bookmark #{other_id} to view or edit it"
+		);
 	}
 
 	// Tri-state: None = unchanged, Some("") = clear, Some(x) = set.
@@ -677,7 +692,10 @@ pub fn check_update_collisions(
 		&& existing.keyword.as_deref() != Some(kw)
 		&& let Some((other_id, other_title)) = find_keyword_owner(conn, kw, id)?
 	{
-		anyhow::bail!("keyword \"{kw}\" already in use by bookmark #{other_id} ({other_title})");
+		anyhow::bail!(
+			"keyword \"{kw}\" already in use by bookmark #{other_id} ({other_title}) — pick a \
+			 different keyword or leave it empty"
+		);
 	}
 	Ok(())
 }
@@ -892,7 +910,10 @@ pub fn restore(conn: &Connection, id: i64) -> Result<bool> {
 		return Ok(false);
 	};
 	if let Some((owner_id, owner_title)) = find_url_owner(conn, &url, id)? {
-		anyhow::bail!("URL already exists as bookmark #{owner_id} ({owner_title})");
+		anyhow::bail!(
+			"URL already exists as bookmark #{owner_id} ({owner_title}) — you can't restore a \
+			 copy on top of a live one; open bookmark #{owner_id} to view or edit it"
+		);
 	}
 
 	// A concurrent writer can slip a live duplicate past the pre-check; the

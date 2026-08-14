@@ -79,7 +79,7 @@ pub fn is_default(conn: &Connection, id: i64) -> Result<bool> {
 pub fn rename(conn: &Connection, id: i64, new_name: &str) -> Result<bool> {
 	let new_name = new_name.trim();
 	if new_name.is_empty() {
-		anyhow::bail!("category name cannot be empty");
+		anyhow::bail!("a category needs a non-empty name");
 	}
 	let rows = conn.execute(
 		"UPDATE categories SET name = ?1 WHERE id = ?2",

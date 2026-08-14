@@ -104,7 +104,10 @@ pub async fn sign_in(
 	// brute-force or credential-stuffing attempt is easy to grep for.
 	let Some(scope) = auth::classify(&state, &req.token) else {
 		crate::log_warn!("auth: sign-in rejected from {addr}: invalid token");
-		return Err(AppError::unauthorized("invalid token").already_logged());
+		return Err(AppError::unauthorized(
+			"that token is not recognized; check WAYPOINTD_SERVE_TOKEN",
+		)
+		.already_logged());
 	};
 	crate::log_info!("auth: sign-in accepted from {addr} ({})", scope_desc(scope));
 	let cookie = session_cookie(&state, &req.token);

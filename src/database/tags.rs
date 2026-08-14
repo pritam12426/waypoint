@@ -83,7 +83,7 @@ pub fn list_with_counts(
 pub fn rename(conn: &Connection, old_name: &str, new_name: &str) -> Result<bool> {
 	let new_name = new_name.trim();
 	if new_name.is_empty() {
-		anyhow::bail!("tag name cannot be empty");
+		anyhow::bail!("a tag needs a non-empty name");
 	}
 	let rows = conn.execute(
 		"UPDATE tags SET name = ?1 WHERE name = ?2",

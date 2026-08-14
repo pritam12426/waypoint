@@ -66,7 +66,8 @@ pub(super) fn validate_keyword(keyword: Option<&str>) -> Result<(), AppError> {
 			.all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 	{
 		return Err(AppError::invalid_keyword(
-			"keyword may only contain letters, digits, '.', '_' and '-'",
+			"a keyword may only contain letters, digits, '.', '_' and '-' \
+			 (it becomes the /keywords/{keyword} path)",
 		));
 	}
 	Ok(())
