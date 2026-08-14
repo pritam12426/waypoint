@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an idea or improvement for waypointd
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your idea. Please describe the problem you are trying
+        to solve before proposing the solution — it helps us design something
+        that fits the project.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What are you trying to do, and why do the current features fall short?
+      placeholder: I want to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or behavior you would like to see.
+      placeholder: It would be great if waypointd could ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you have tried, or other ways this could be designed.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, screenshots, or notes about how this would fit with existing behavior.

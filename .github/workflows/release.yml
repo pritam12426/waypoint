@@ -1,0 +1,120 @@
+name: release-builds
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Native runners: Linux, macOS (arm64 + x86_64), Windows.
+  build-native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+            artifact: waypointd-linux-x86_64
+          - os: macos-latest
+            name: macOS aarch64
+            artifact: waypointd-macos-aarch64
+          - os: macos-13
+            name: macOS x86_64
+            artifact: waypointd-macos-x86_64
+          - os: windows-latest
+            name: Windows x86_64
+            artifact: waypointd-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      # frontend/dist is gitignored but rust-embed requires it to exist at
+      # compile time, so build the SPA before touching cargo.
+      - name: Build frontend
+        working-directory: frontend
+        run: bun install --frozen-lockfile && bun run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/waypointd$EXT" "dist/${{ matrix.artifact }}"
+        env:
+          EXT: ${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  # No native BSD runners exist on GitHub, so build inside a FreeBSD VM
+  # (vmactions/freebsd-vm). The workspace is rsynced in and back out, so the
+  # compiled binary lands back on the host runner for upload.
+  build-freebsd:
+    name: FreeBSD x86_64
+    runs-on: ubuntu-latest
+    env:
+      SSL_CERT_FILE: /usr/local/etc/ssl/cert.pem
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend
+        working-directory: frontend
+        run: bun install --frozen-lockfile && bun run build
+
+      - name: Build release binary in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          envs: "SSL_CERT_FILE"
+          prepare: |
+            pkg install -y rust ca_root_nss
+          run: |
+            cargo build --release --locked
+            cp target/release/waypointd waypointd-freebsd-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: waypointd-freebsd-x86_64
+          path: waypointd-freebsd-x86_64
+
+  # Collect every platform binary and attach it to the release.
+  attach-to-release:
+    name: Attach binaries to release
+    if: github.event_name == 'release'
+    needs: [build-native, build-freebsd]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

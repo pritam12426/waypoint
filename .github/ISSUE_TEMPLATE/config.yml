@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: waypointd repository
+    url: https://github.com/pritam12426/waypointd
+    about: Project home, README, and release notes.
+  - name: Documentation
+    url: https://github.com/pritam12426/waypointd/blob/main/docs/README.md
+    about: Configuration, operations, and the HTTP API reference.

@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a crash, a wrong result, or other unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in waypointd. Please fill in
+        as much as you can — the more context, the faster we can fix it.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what actually happened?
+      placeholder: The server returned a 500 on POST /api/bookmarks ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, concrete steps. Include the exact URLs/headers/body if it is an API issue.
+      placeholder: |
+        1. Start waypointd with WAYPOINTD_DB_PATH=/tmp/test.sqlite
+        2. POST /api/bookmarks with ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, git commit SHA, or "main" if you built from source.
+      placeholder: v0.1.0 / abc1234 / main
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where are you running waypointd?
+      multiple: true
+      options:
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+        - FreeBSD / other BSD
+        - Container / other
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The WAYPOINTD_* env vars you set (values for secrets may be redacted).
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste the server log output or the error message from your terminal.
+      render: shell
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else?
+      description: Relevant context, screenshots, or a minimal repro of the DB state.
