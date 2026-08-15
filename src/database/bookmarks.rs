@@ -1197,31 +1197,3 @@ pub fn count_search(
 	crate::log_trace!("count_search {query:?} (archive={archived}) -> {total}");
 	Ok(total)
 }
-
-/// Fetches bookmarks by id, active only, in id order. Used by the API's
-/// bulk read paths.
-///
-/// Builds the `IN (...)` placeholder list from the id count; ids are i64s
-/// from the caller (never user strings), so splicing the placeholder count
-/// is safe. Empty input short-circuits to an empty result.
-pub fn get_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Bookmark>> {
-	if ids.is_empty() {
-		crate::log_trace!("get_by_ids([]) -> 0 rows");
-		return Ok(Vec::new());
-	}
-	let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
-	let sql = format!(
-		"SELECT {SELECT_BOOKMARK_FIELDS}
-         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id
-         WHERE b.id IN ({}) AND b.trashed_at IS NULL
-         ORDER BY b.id ASC",
-		placeholders.join(", ")
-	);
-	let mut stmt = conn.prepare(&sql)?;
-	let params: Vec<&dyn rusqlite::ToSql> =
-		ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-	let rows = stmt.query_map(params.as_slice(), row_to_bookmark)?;
-	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-	crate::log_trace!("get_by_ids({ids:?}) -> {} rows", bookmarks.len());
-	attach_tags(conn, bookmarks)
-}

@@ -43,7 +43,7 @@ mod idempotency;
 mod jobs;
 mod metrics;
 
-pub use cache::{CountCache, StatsCache};
+pub use cache::Cache;
 pub use idempotency::IdempotencyStore;
 pub use jobs::Jobs;
 pub use metrics::Metrics;
@@ -153,8 +153,8 @@ pub struct Settings {
 #[derive(Clone)]
 pub struct AppState {
 	pub db: Arc<database::Db>,
-	pub counts: Arc<cache::CountCache>,
-	pub stats: Arc<cache::StatsCache>,
+	pub counts: Arc<cache::Cache<i64>>,
+	pub stats: Arc<cache::Cache<Vec<u8>>>,
 	pub jobs: Arc<Jobs>,
 	pub api_token: Option<String>,
 	pub read_token: Option<String>,
@@ -167,33 +167,10 @@ pub struct AppState {
 }
 
 impl AppState {
-	/// Recompute every warm cache entry in place after a successful write,
-	/// so the in-memory caches reflect the new data immediately and the next
-	/// read is still a hit. Entries that were never cached stay cold and are
-	/// computed on demand as before. Runs the recomputes on a blocking task
-	/// (they are SQLite queries); if that task fails the caches are dropped
-	/// instead so nothing stale is ever served.
-	pub async fn refresh_caches(&self) {
-		let counts = self.counts.clone();
-		let stats = self.stats.clone();
-		let db = self.db.clone();
-		let ok = tokio::task::spawn_blocking(move || {
-			let conn = db.reader();
-			counts.refresh(&conn);
-			stats.refresh(&conn);
-		})
-		.await
-		.is_ok();
-		if !ok {
-			crate::log_warn!("cache refresh panicked — invalidating caches instead");
-			self.invalidate_caches();
-		}
-	}
-
-	/// Drop both caches. The visit-tracking redirects and any cache-refresh
-	/// failure land here: coarse invalidation is the safe choice because a
-	/// bookmark, tag, or category mutation can change any filter's count and
-	/// any aggregate.
+	/// Drop both caches after a successful write. A bookmark, tag, or
+	/// category mutation can change any filter's count and any aggregate, so
+	/// coarse invalidation is the safe choice; the next read recomputes the
+	/// entries it needs.
 	pub fn invalidate_caches(&self) {
 		self.counts.invalidate();
 		self.stats.invalidate();
@@ -215,8 +192,8 @@ pub async fn run(settings: Settings) -> Result<()> {
 	let db_arc = Arc::new(db);
 	let state = AppState {
 		db: db_arc.clone(),
-		counts: Arc::new(cache::CountCache::new()),
-		stats: Arc::new(cache::StatsCache::new()),
+		counts: Arc::new(cache::Cache::new(Duration::from_secs(5))),
+		stats: Arc::new(cache::Cache::new(Duration::from_secs(30))),
 		jobs: Arc::new(Jobs::new()),
 		api_token: settings.api_token.clone(),
 		read_token: settings.read_token.clone(),
@@ -409,8 +386,10 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
 	// Static frontend files (index.html, /assets/*, favicon.ico) get a debug
 	// line instead of info — a page load would otherwise spam the access log
 	// with tens of asset requests, burying the API traffic it's there to
-	// show. The marker header is set by the static handler.
-	if response.headers().contains_key(X_WAYPOINT_STATIC) {
+	// show. The marker header is set by the static handler. Redirects
+	// (/open/{id}, /keywords/{keyword}) are navigational noise the browser
+	// chases on its own, so they get a debug line too.
+	if response.headers().contains_key(X_WAYPOINT_STATIC) || status.is_redirection() {
 		crate::log_debug!("{method} {path}: {status} in {elapsed:?}");
 	} else {
 		crate::log_info!("{method} {path}: {status} in {elapsed:?}");
@@ -508,10 +487,6 @@ pub fn app(state: AppState) -> Router {
 		.route("/stats", get(handlers::stats_overview))
 		.route("/stats/domains", get(handlers::domain_stats))
 		.route("/stats/tags", get(handlers::stats_tags))
-		.route(
-			"/stats/bookmarks/{id}",
-			get(handlers::stats_bookmark_detail),
-		)
 		.route("/stats/top-visited", get(handlers::stats_top_visited))
 		.route("/stats/never-visited", get(handlers::stats_never_visited))
 		.route("/stats/orphan-tags", get(handlers::stats_orphan_tags))

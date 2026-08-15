@@ -23,11 +23,9 @@
 //!     and path), which matters once requests start interleaving under
 //!     concurrent load.
 //!
-//! Compile-time feature gates (`show_time_stamp`, `show_source_location`)
-//! compile out entirely when disabled, so there's no runtime cost for a
-//! feature you're not using. Both are default-on: timestamps always show,
-//! and source locations only in debug builds (the code paths are further
-//! gated on `debug_assertions`).
+//! Timestamps always print; source locations are gated on
+//! `debug_assertions`, so they only appear in debug builds (compile out in
+//! release).
 //!
 //! # Output shapes
 //!
@@ -48,7 +46,6 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(feature = "show_time_stamp")]
 use chrono::Local;
 
 pub mod macros;
@@ -310,12 +307,10 @@ fn write_color_label(out: &mut dyn Write, level: LogLevel) -> io::Result<()> {
 	write!(out, "[{color}{name}{RESET}] ")
 }
 
-#[cfg(feature = "show_time_stamp")]
 fn timestamp_str() -> String {
 	Local::now().format("%d-%b-%Y %H:%M:%S%.6f").to_string()
 }
 
-#[cfg(feature = "show_time_stamp")]
 fn write_time_stamp(out: &mut dyn Write, use_color: bool) -> io::Result<()> {
 	if use_color {
 		write!(out, "{}", color::DIM)?;
@@ -339,7 +334,7 @@ fn write_request_ctx(out: &mut dyn Write, ctx: &RequestCtx) -> io::Result<()> {
 }
 
 /// Source-location info captured at the call site. Only ever constructed
-/// when the `show_source_location` feature is enabled — see `__loc!()`.
+/// in debug builds — see `__loc!()`.
 #[doc(hidden)]
 pub struct SourceLoc {
 	pub file: &'static str,
@@ -386,10 +381,7 @@ pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: 
 				"level": level_label_json(level),
 				"msg": msg,
 			});
-			#[cfg(feature = "show_time_stamp")]
-			{
-				obj["ts"] = serde_json::json!(timestamp_str());
-			}
+			obj["ts"] = serde_json::json!(timestamp_str());
 			if let Some(l) = &loc {
 				obj["file"] = serde_json::json!(l.file);
 				obj["line"] = serde_json::json!(l.line);
@@ -406,7 +398,6 @@ pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: 
 			}
 		}
 		LogFormat::Pretty => {
-			#[cfg(feature = "show_time_stamp")]
 			let _ = write_time_stamp(stream, use_color);
 
 			let _ = if use_color {
@@ -419,7 +410,7 @@ pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: 
 				let _ = write_request_ctx(stream, ctx);
 			}
 
-			#[cfg(all(feature = "show_source_location", debug_assertions))]
+			#[cfg(debug_assertions)]
 			if let Some(l) = &loc {
 				let (pre, post) = if use_color {
 					(color::DIM, color::RESET)
@@ -428,7 +419,7 @@ pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: 
 				};
 				let _ = write!(stream, "{}[{}:{}:{}]{} ", pre, l.file, l.line, l.func, post);
 			}
-			#[cfg(not(all(feature = "show_source_location", debug_assertions)))]
+			#[cfg(not(debug_assertions))]
 			let _ = &loc;
 
 			let _ = write!(stream, "{}", msg);

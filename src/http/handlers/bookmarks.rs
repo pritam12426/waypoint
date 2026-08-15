@@ -8,9 +8,6 @@
 //! bulk operations, and emptying the trash.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-
-use rusqlite::Connection;
 
 use axum::{
 	Json,
@@ -203,14 +200,7 @@ pub async fn list_bookmarks(
 			Some(total) => total,
 			None => {
 				let total = bm_db::count(&conn, &filter)?;
-				// Keep a copy of the filter with the entry so a successful
-				// write can refresh the count in place (see
-				// `cache::CountCache::refresh`).
-				let refresh = {
-					let refresh_filter = filter.clone();
-					Arc::new(move |conn: &Connection| bm_db::count(conn, &refresh_filter))
-				};
-				counts.put(&count_key, total, refresh);
+				counts.put(&count_key, total);
 				total
 			}
 		};
@@ -348,7 +338,7 @@ pub async fn create_bookmark(
 		bm_db::insert_resolved(&db.writer(), &new_for_db, media)
 	})
 	.await??;
-	state.refresh_caches().await;
+	state.invalidate_caches();
 	crate::log_info!("{addr} created bookmark #{id}: {created_url}");
 
 	// Re-fetch to return the fully hydrated bookmark (with tags attached
@@ -497,7 +487,7 @@ pub async fn update_bookmark(
 			"bookmark #{id} does not exist (or has been trashed)"
 		)));
 	};
-	state.refresh_caches().await;
+	state.invalidate_caches();
 	// `describe` diffs the pre-update bookmark against the request so the
 	// change log shows exactly what moved ("title: A -> B", "starred: no ->
 	// yes").
@@ -549,7 +539,7 @@ pub async fn delete_bookmark(
 	};
 
 	if removed {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 		if purge {
 			crate::log_info!("{addr} purged bookmark #{id}");
 		} else {
@@ -586,7 +576,7 @@ pub async fn restore_bookmark(
 	let db = state.db.clone();
 	let restored = tokio::task::spawn_blocking(move || bm_db::restore(&db.writer(), id)).await??;
 	if restored {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 	}
 	Ok(if restored {
 		crate::log_info!("{addr} restored bookmark #{id}");
@@ -799,7 +789,7 @@ pub async fn bulk_delete_bookmarks(
 		result.removed
 	);
 	if !dry_run && result.removed > 0 {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 	}
 	Ok(Json(result))
 }
@@ -918,7 +908,7 @@ pub async fn bulk_update_bookmarks(
 		skipped.len()
 	);
 	if !updated.is_empty() {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 	}
 	Ok(Json(BulkUpdateResult { updated, skipped }))
 }
@@ -986,7 +976,7 @@ pub async fn empty_trash(
 		result.removed
 	);
 	if !dry_run && result.removed > 0 {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 	}
 	Ok(Json(result))
 }

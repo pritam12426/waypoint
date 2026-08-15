@@ -90,7 +90,7 @@ pub async fn import_bookmarks(
 		result.skipped
 	);
 	if result.imported > 0 {
-		state.refresh_caches().await;
+		state.invalidate_caches();
 	}
 	Ok(Json(result))
 }

@@ -97,7 +97,7 @@ pub async fn rename_category(
 		tokio::task::spawn_blocking(move || cat_db::rename(&db2.writer(), id, &name)).await??;
 	if renamed {
 		crate::log_info!("{addr} renamed category #{id} -> {:?}", body.name);
-		state.refresh_caches().await;
+		state.invalidate_caches();
 		Ok(StatusCode::OK)
 	} else {
 		Err(AppError::not_found(format!(
@@ -137,7 +137,7 @@ pub async fn delete_category(
 	let deleted = tokio::task::spawn_blocking(move || cat_db::delete(&db2.writer(), id)).await??;
 	if deleted {
 		crate::log_info!("{addr} deleted category #{id} (bookmarks moved to default)");
-		state.refresh_caches().await;
+		state.invalidate_caches();
 		Ok(StatusCode::NO_CONTENT)
 	} else {
 		Err(AppError::not_found(format!(
@@ -203,7 +203,7 @@ pub async fn rename_tag(
 		tokio::task::spawn_blocking(move || tag_db::rename(&db.writer(), &old, &new)).await??;
 	if renamed {
 		crate::log_info!("{addr} renamed tag {old_name:?} -> {:?}", body.name);
-		state.refresh_caches().await;
+		state.invalidate_caches();
 		Ok(StatusCode::OK)
 	} else {
 		Err(AppError::not_found(format!(
@@ -235,7 +235,7 @@ pub async fn delete_tag(
 		tokio::task::spawn_blocking(move || tag_db::delete(&db.writer(), &tag_name)).await??;
 	if deleted {
 		crate::log_info!("{addr} deleted tag {name:?}");
-		state.refresh_caches().await;
+		state.invalidate_caches();
 		Ok(StatusCode::NO_CONTENT)
 	} else {
 		Err(AppError::not_found(format!("tag {name:?} does not exist")))

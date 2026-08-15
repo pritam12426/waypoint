@@ -81,15 +81,10 @@ pub struct SiteRule {
 
 /// Splits a URL into its scheme and host. Host excludes port, userinfo, and
 /// any path/query/fragment. Returns `None` for the host when the input has
-/// no recognizable host at all.
-///
-/// Pipeline (mirrors `shared::extract_domain`, but also keeps the scheme,
-/// which the favicon fallback needs to rebuild the URL):
-/// 1. strip the scheme (`split_once("://")`);
-/// 2. cut at the first `/`, `?`, or `#` to drop path/query/fragment;
-/// 3. drop userinfo with `rsplit('@')` — keep only the last `@` segment;
-/// 4. drop the port after the first `:`;
-/// 5. trim whitespace.
+/// The URL's scheme and host. The host comes from `shared::host_of` (scheme
+/// stripped, path/query/fragment, userinfo and port dropped, trimmed) so the
+/// media pipeline and `shared::extract_domain` share one splitter; the
+/// scheme is kept because the favicon fallback needs it to rebuild the URL.
 ///
 /// The scheme is returned even when the host is missing so callers can
 /// distinguish "malformed URL" from "scheme-less URL".
@@ -97,19 +92,8 @@ pub struct SiteRule {
 /// `pub(crate)` so `core::fetch` could reuse it if it ever needs to
 /// rebuild URLs from pieces.
 pub(crate) fn scheme_and_host(url: &str) -> (Option<&str>, Option<&str>) {
-	let (scheme, rest) = match url.split_once("://") {
-		Some((s, r)) => (Some(s), r),
-		None => (None, url),
-	};
-	let host_and_rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-	let host = host_and_rest.rsplit('@').next().unwrap_or(host_and_rest);
-	let host = host.split(':').next().unwrap_or(host);
-	let host = host.trim();
-	if host.is_empty() {
-		(scheme, None)
-	} else {
-		(scheme, Some(host))
-	}
+	let scheme = url.split_once("://").map(|(s, _)| s);
+	(scheme, crate::shared::host_of(url))
 }
 
 /// Extracts the path (with leading slash) from a URL, query and fragment
@@ -141,7 +125,9 @@ fn path_of(url: &str) -> &str {
 /// (where the char before the suffix would be `.`, not a boundary at the
 /// *start*) can't match. Note `url_host.len() > suffix.len()` guarantees
 /// `start >= 1`, so `start - 1` never underflows.
-fn host_matches(url_host: &str, suffix: &str) -> bool {
+/// `pub(crate)` so site matchers outside the rule table (`core::sites`)
+/// reuse the same host-suffix rule.
+pub(crate) fn host_matches(url_host: &str, suffix: &str) -> bool {
 	if url_host.eq_ignore_ascii_case(suffix) {
 		return true;
 	}

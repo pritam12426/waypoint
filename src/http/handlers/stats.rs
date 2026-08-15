@@ -10,24 +10,20 @@
 use std::net::SocketAddr;
 
 use axum::{
-	Json,
-	extract::{ConnectInfo, Path, Query, State},
+	extract::{ConnectInfo, Query, State},
 	http::{HeaderMap, header},
 	response::Response,
 };
 use serde::Deserialize;
 use utoipa::IntoParams;
 
-use super::shared::{cached_json, stats_key, validate_id, validate_offset, validate_stats_limit};
+use super::shared::{cached_json, stats_key, validate_offset, validate_stats_limit};
 use crate::{
-	database::{bookmarks as bm_db, stats as st_db, tags as tag_db, visits as vis_db},
-	http::{
-		AppState,
-		error::{ApiErrorBody, AppError},
-	},
+	database::{stats as st_db, tags as tag_db, visits as vis_db},
+	http::{AppState, error::AppError},
 	model::{
-		Bookmark, DomainCount, DomainVisitStats, HygieneStats, MonthlyActivity,
-		NeverVisitedBookmark, OrphanTag, StatsOverview, TagCount,
+		DomainCount, DomainVisitStats, HygieneStats, MonthlyActivity, NeverVisitedBookmark,
+		OrphanTag, StatsOverview, TagCount,
 	},
 };
 
@@ -97,35 +93,6 @@ pub async fn stats_overview(
 }
 
 /// Detailed info for a specific bookmark by ID.
-#[utoipa::path(
-	get,
-	path = "/api/stats/bookmarks/{id}",
-	tag = "stats",
-	params(("id" = i64, Path, description = "Bookmark ID")),
-	responses(
-		(status = 200, description = "Bookmark detail", body = Bookmark),
-		(status = 400, description = "Invalid bookmark ID", body = ApiErrorBody),
-		(status = 404, description = "Bookmark not found", body = ApiErrorBody),
-	),
-)]
-pub async fn stats_bookmark_detail(
-	State(state): State<AppState>,
-	ConnectInfo(addr): ConnectInfo<SocketAddr>,
-	Path(id): Path<i64>,
-) -> Result<Json<Bookmark>, AppError> {
-	let id = validate_id(id)?;
-	crate::log_debug!("{addr} GET /api/stats/bookmarks/{id}");
-	let db = state.db.clone();
-	let bookmarks =
-		tokio::task::spawn_blocking(move || bm_db::get_by_ids(&db.reader(), &[id])).await??;
-	match bookmarks.into_iter().next() {
-		Some(b) => Ok(Json(b)),
-		None => Err(AppError::not_found(format!(
-			"bookmark #{id} does not exist (or has been trashed)"
-		))),
-	}
-}
-
 /// Top tags by bookmark count.
 #[utoipa::path(
 	get,

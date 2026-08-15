@@ -31,8 +31,8 @@ fn test_state() -> (tempfile::TempDir, AppState) {
 	let db = database::Db::open(dir.path().join("waypointd.db")).unwrap();
 	let state = AppState {
 		db: Arc::new(db),
-		counts: Arc::new(waypointd::http::CountCache::new()),
-		stats: Arc::new(waypointd::http::StatsCache::new()),
+		counts: Arc::new(waypointd::http::Cache::new(Duration::from_secs(5))),
+		stats: Arc::new(waypointd::http::Cache::new(Duration::from_secs(30))),
 		jobs: Arc::new(Jobs::new()),
 		api_token: None,
 		read_token: None,
@@ -583,7 +583,8 @@ async fn stats_endpoints_are_cached_with_etag_and_304() {
 	assert_eq!(body_text(res).await, first_body);
 
 	// Distinct aggregate keys are cached separately; a successful write
-	// refreshes the warm entries in place rather than dropping them.
+	// invalidates the caches wholesale, so the next read recomputes the
+	// fresh body instead of serving a stale one.
 	let res = request(
 		&state,
 		Method::POST,
@@ -592,11 +593,9 @@ async fn stats_endpoints_are_cached_with_etag_and_304() {
 	)
 	.await;
 	assert_eq!(res.status(), StatusCode::CREATED);
-	// The write recomputed the overview body, so the entry survives (not
-	// dropped) and already reflects the new bookmark.
 	assert!(
-		state.stats.get("overview").is_some(),
-		"a successful write must refresh, not drop, the stats cache"
+		state.stats.get("overview").is_none(),
+		"a successful write must invalidate the stats cache"
 	);
 	let res = request(&state, Method::GET, "/api/stats", Body::empty()).await;
 	assert_eq!(res.status(), StatusCode::OK);
@@ -604,7 +603,7 @@ async fn stats_endpoints_are_cached_with_etag_and_304() {
 }
 
 #[tokio::test]
-async fn successful_write_refreshes_warm_count_cache() {
+async fn successful_write_invalidates_warm_count_cache() {
 	silence_logs();
 	let (_dir, state) = test_state();
 
@@ -619,9 +618,8 @@ async fn successful_write_refreshes_warm_count_cache() {
 		"listing must warm the count cache"
 	);
 
-	// A successful create must refresh the entry in place — it survives the
-	// write (not dropped for the next read to rebuild) and already carries
-	// the new total.
+	// A successful create must invalidate the entry — the next list
+	// recomputes the new total.
 	let res = request(
 		&state,
 		Method::POST,
@@ -632,8 +630,8 @@ async fn successful_write_refreshes_warm_count_cache() {
 	assert_eq!(res.status(), StatusCode::CREATED);
 	assert_eq!(
 		state.counts.get(&key),
-		Some(1),
-		"a successful create must refresh, not drop, the count cache"
+		None,
+		"a successful create must invalidate the count cache"
 	);
 }
 

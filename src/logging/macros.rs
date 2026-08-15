@@ -8,7 +8,7 @@
 //! (`$crate::log_info!`, etc), so callers use `crate::log_*!` /
 //! `waypointd::log_*!` regardless of this file's module path. Each macro
 //! captures the caller's source location automatically (via `__loc!()`),
-//! replacing the old `show_source_location` gate.
+//! with the location only recorded in debug builds.
 
 #[doc(hidden)]
 #[macro_export]
@@ -23,7 +23,7 @@ macro_rules! __function_name {
 	}};
 }
 
-#[cfg(all(feature = "show_source_location", debug_assertions))]
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __loc {
@@ -36,7 +36,7 @@ macro_rules! __loc {
 	};
 }
 
-#[cfg(not(all(feature = "show_source_location", debug_assertions)))]
+#[cfg(not(debug_assertions))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __loc {

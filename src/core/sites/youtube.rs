@@ -36,7 +36,7 @@
 use std::sync::LazyLock;
 
 use super::super::fetch::fetch_html_limited;
-use super::super::media::{MediaTarget, SiteRule};
+use super::super::media::{MediaTarget, SiteRule, host_matches};
 
 // --- network fetch (backing the `Fetch` asset mode) ---------------------
 
@@ -69,17 +69,8 @@ fn on_youtube(url: &str) -> Option<&str> {
 		Some(("http" | "https", rest)) => rest,
 		_ => return None,
 	};
-	let host = without_scheme
-		.split(['/', '?', '#'])
-		.next()
-		.unwrap_or(without_scheme)
-		.rsplit('@')
-		.next()
-		.unwrap_or(without_scheme);
-	let host = host.split(':').next().unwrap_or(host).trim();
-	if !host.eq_ignore_ascii_case("youtube.com")
-		&& !host.to_ascii_lowercase().ends_with(".youtube.com")
-	{
+	let host = crate::shared::host_of(without_scheme)?;
+	if !host_matches(host, "youtube.com") {
 		return None;
 	}
 	Some(without_scheme)

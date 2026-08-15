@@ -9,8 +9,6 @@
 //! is `pub(super)` — visible to the sibling handler modules, never re-exported
 //! through `handlers::*`.
 
-use std::sync::Arc;
-
 use axum::{
 	http::{HeaderName, StatusCode, header},
 	response::{IntoResponse, Response},
@@ -114,7 +112,7 @@ pub(super) fn validate_bounds(
 
 /// Cache key for a paged aggregate endpoint. The underlying queries are
 /// full-corpus GROUP BY / ORDER BY passes, so they are cached server-side
-/// (see `StatsCache`); the key must include pagination because a 50-row
+/// (see `cache::Cache`); the key must include pagination because a 50-row
 /// slice and a 200-row slice are different queries.
 pub(super) fn stats_key(endpoint: &str, limit: i64, offset: i64) -> String {
 	format!("{endpoint}:{limit}:{offset}")
@@ -125,16 +123,11 @@ pub(super) fn stats_key(endpoint: &str, limit: i64, offset: i64) -> String {
 /// (matching the server TTL, so the browser can serve the dashboard from
 /// its own cache) and a strong ETag; a matching `If-None-Match` short-
 /// circuits to 304.
-///
-/// `compute` must be a `Fn` (not `FnOnce`) so a copy can be stored with the
-/// cache entry — a successful write then refreshes the body in place via
-/// `AppState::refresh_caches` instead of dropping it and waiting for the
-/// next read to rebuild it.
 pub(super) async fn cached_json<T>(
 	state: &AppState,
 	key: String,
 	if_none_match: Option<&str>,
-	compute: impl Fn(&Connection) -> anyhow::Result<T> + Clone + Send + Sync + 'static,
+	compute: impl Fn(&Connection) -> anyhow::Result<T> + Send + 'static,
 ) -> Result<Response, AppError>
 where
 	T: serde::Serialize,
@@ -145,25 +138,13 @@ where
 	}
 	crate::log_trace!("cached_json: computing {key:?} (stats cache miss)");
 	let db = state.db.clone();
-	let body = tokio::task::spawn_blocking({
-		let compute = compute.clone();
-		move || {
-			let conn = db.reader();
-			let value = compute(&conn)?;
-			Ok::<_, anyhow::Error>(serde_json::to_vec(&value)?)
-		}
+	let body = tokio::task::spawn_blocking(move || {
+		let conn = db.reader();
+		let value = compute(&conn)?;
+		Ok::<_, anyhow::Error>(serde_json::to_vec(&value)?)
 	})
 	.await??;
-	// Keep a copy of `compute` with the cache entry so `refresh` can
-	// recompute this body after a write (see `cache::StatsCache::refresh`).
-	let refresh = {
-		let compute = compute.clone();
-		Arc::new(move |conn: &Connection| {
-			let value = compute(conn)?;
-			Ok(serde_json::to_vec(&value)?)
-		})
-	};
-	state.stats.put(&key, body.clone(), refresh);
+	state.stats.put(&key, body.clone());
 	Ok(etag_response(body, if_none_match))
 }
 

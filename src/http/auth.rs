@@ -178,7 +178,7 @@ pub async fn require_api_token(
 mod tests {
 	use super::*;
 	use crate::http::AppState;
-	use crate::http::cache::{CountCache, StatsCache};
+	use crate::http::cache::Cache;
 	use crate::http::idempotency::IdempotencyStore;
 	use crate::http::metrics::Metrics;
 	use std::sync::Arc;
@@ -187,8 +187,8 @@ mod tests {
 	fn state(full: Option<&str>, read: Option<&str>) -> AppState {
 		AppState {
 			db: Arc::new(crate::database::Db::in_memory().unwrap()),
-			counts: Arc::new(CountCache::new()),
-			stats: Arc::new(StatsCache::new()),
+			counts: Arc::new(Cache::new(Duration::from_secs(5))),
+			stats: Arc::new(Cache::new(Duration::from_secs(30))),
 			jobs: Arc::new(crate::http::Jobs::new()),
 			api_token: full.map(str::to_owned),
 			read_token: read.map(str::to_owned),

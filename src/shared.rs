@@ -46,6 +46,18 @@
 /// Returns `None` when nothing is left (e.g. an empty string or a bare
 /// `://`), so the caller can fall back to storing `NULL`.
 pub fn extract_domain(input: &str) -> Option<String> {
+	host_of(input).map(str::to_lowercase)
+}
+
+/// The host of a URL: scheme stripped, cut at the first `/`, `?`, or `#`,
+/// userinfo stripped (`rsplit('@')`), port stripped, trimmed. Returns
+/// `None` when nothing is left (empty input or a bare `://`), so callers
+/// can fall back to their own default.
+///
+/// Shared by `extract_domain` and the media engine's `scheme_and_host`;
+/// the link checker's breaker key additionally handles bracket IPv6
+/// literals and lives in `core::fetch`.
+pub fn host_of(input: &str) -> Option<&str> {
 	let without_scheme = match input.find("://") {
 		Some(idx) => &input[idx + 3..],
 		None => input,
@@ -56,11 +68,8 @@ pub fn extract_domain(input: &str) -> Option<String> {
 		.unwrap_or(without_scheme);
 	let host = host_and_rest.rsplit('@').next().unwrap_or(host_and_rest);
 	let host = host.split(':').next().unwrap_or(host);
-	if host.is_empty() {
-		None
-	} else {
-		Some(host.to_lowercase())
-	}
+	let host = host.trim();
+	if host.is_empty() { None } else { Some(host) }
 }
 
 /// Upper bound for `limit` on every list/search HTTP endpoint. Anything

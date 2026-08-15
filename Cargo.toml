@@ -8,15 +8,6 @@
 	# `src/main.rs` is the default binary entry point for a package named
 	# "waypointd" — no [[bin]] section needed.
 
-[features]
-	# Both are on by default: timestamps show in every build, and source
-	# locations only take effect in debug builds (the code paths are gated
-	# on `debug_assertions` too — see src/logging/).
-	default = ["show_time_stamp", "show_source_location"]
-	# See src/logging/mod.rs for what these two toggle.
-	show_time_stamp = ["dep:chrono"]
-	show_source_location = []
-
 [dev-dependencies]
 	# Integration tests: temp-dir databases and axum-router request
 	# injection via `tower::ServiceExt::oneshot` (no port binding needed).
@@ -36,9 +27,8 @@
 	mime_guess = "2"
 
 	# Structured logging: a hand-rolled logger (stderr or a single file,
-	# pretty or JSON). Only pulled in when the `show_time_stamp` logging
-	# feature is enabled.
-	chrono = { version = "0.4", optional = true }
+	# pretty or JSON) with timestamps in every build.
+	chrono = { version = "0.4" }
 
 	# Embeds `frontend/` into the binary so every build (debug and release)
 	# ships the SPA the same way.

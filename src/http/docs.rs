@@ -105,7 +105,6 @@ const DOCS_UI_HTML: &str = r##"<!DOCTYPE html>
 		stats_overview,
 		domain_stats,
 		stats_tags,
-		stats_bookmark_detail,
 		stats_top_visited,
 		stats_never_visited,
 		stats_orphan_tags,
