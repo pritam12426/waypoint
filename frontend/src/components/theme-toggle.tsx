@@ -3,7 +3,6 @@ import { Button } from "#/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "#/components/ui/tooltip";
 import { useApp } from "#/lib/state";
 
-// Header sun/moon button that flips the theme stored in the app store.
 export function ThemeToggle() {
 	const theme = useApp((s) => s.theme);
 	const toggleTheme = useApp((s) => s.toggleTheme);
