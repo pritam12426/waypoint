@@ -2,8 +2,6 @@ import type * as React from "react";
 import { forwardRef } from "react";
 import { cn } from "#/lib/utils";
 
-// Text input with the standard form-field styling. Forwarded ref so it works
-// with react-hook-form's register().
 export const Input = forwardRef<
 	HTMLInputElement,
 	React.ComponentPropsWithoutRef<"input">

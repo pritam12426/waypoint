@@ -1,7 +1,6 @@
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Multi-line text input, same field styling as Input.
 export function Textarea({
 	className,
 	...props

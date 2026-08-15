@@ -3,8 +3,6 @@ import { type VariantProps, cva } from "class-variance-authority";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// shadcn-style button: CVA variant/size classes + optional Radix Slot so any
-// element can render the button styles (used by Link when a whole row is clickable).
 const buttonVariants = cva(
 	"inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
 	{
