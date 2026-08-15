@@ -6,44 +6,53 @@ single `.sqlite` file (plus, transiently, its `-wal`/`-shm` sidecars). The
 default path is `waypoint.sqlite` in the working directory; `WAYPOINTD_DB_FILE`
 overrides it.
 
-## The migration runner
+## The schema init script
 
-The schema's single source of truth is the SQL files under
-`src/database/migrations/`, embedded via `include_str!` and applied in order
-by `src/database/migrations.rs`. Every applied file is recorded in the
-`schema_migrations` table, so migrations run **once**, forward-only — never
-DROP-then-CREATE. Adding a migration is one new `NNNN_name.up.sql` plus one
-entry in the `MIGRATIONS` array, nothing else.
+The schema's single source of truth is `src/database/migrations/0001_init.up.sql`,
+embedded via `include_str!` and re-run on *every* startup by
+`src/database/migrations.rs`. There's no versioned migration runner and no
+tracking table: every statement in the script is written idempotently
+(`CREATE ... IF NOT EXISTS`, `DROP ... IF EXISTS`), so re-running it on a
+database that already has the schema is a no-op. Evolving the schema means
+editing that one file, nothing else.
 
-There are three migrations today:
+The script holds everything in one batch:
 
-- **0001** — the full schema: categories, bookmarks, tags, the
-  bookmark_tags junction, the active-only unique indexes on `url` and
-  `keyword`, the column-scoped `updated_at` trigger, and the two FTS5
-  virtual tables with their trigger set.
-- **0002** — ORDER BY-matching partial indexes (`(created_at, id) WHERE
-  trashed_at IS NULL`, `(visit_count DESC, id ASC) WHERE trashed_at IS
-  NULL`, `(trashed_at, id) WHERE trashed_at IS NOT NULL`) and drops 0001's
-  redundant `idx_bookmarks_trashed`. The story there is worth reading if
-  you touch list performance: SQLite picks exactly one index per query, and
-  the old single-column `trashed_at` index had the same predicate as the
-  ordering indexes, so every list request matched on `trashed_at = NULL`
-  and then temp-b-tree sorted the whole corpus. Removing it is what lets
-  the ordering indexes win.
-- **0003** — a NOCASE partial index on `keyword`, so address-bar shortcuts
-  stay an index seek regardless of case. The BINARY unique index stays for
-  DB-level uniqueness; mixed-case pre-existing rows are tolerated and
-  resolved deterministically with `ORDER BY id LIMIT 1`.
+- **categories, bookmarks, tags, bookmark_tags** — the core tables. The
+  bookmarks row carries `redirect_template` (TEXT, NULL):
+  an optional URL template with a `{%s}` placeholder that
+  `/keywords/{keyword} <value>` fills with the address-bar value
+  (percent-encoded) instead of redirecting to the plain `url`.
+- **Indexes** — the active-only unique indexes on `url` and `keyword` (a
+  trashed bookmark never blocks re-adding the same URL or keyword), the
+  ORDER BY-matching partial indexes `idx_bookmarks_created`
+  (`(created_at, id) WHERE trashed_at IS NULL`), `idx_bookmarks_visit`
+  (`(visit_count DESC, id ASC) WHERE trashed_at IS NULL`), and
+  `idx_bookmarks_trash` (`(trashed_at, id) WHERE trashed_at IS NOT NULL`),
+  plus a NOCASE partial index on `keyword` so address-bar shortcuts stay an
+  index seek regardless of case. The story behind the partial indexes is
+  worth reading if you touch list performance: SQLite picks exactly one
+  index per query, and the old single-column `trashed_at` index had the same
+  predicate as the ordering indexes, so every list request matched on
+  `trashed_at = NULL` and then temp-b-tree sorted the whole corpus. Removing
+  it is what lets the ordering indexes win.
+- **The `updated_at` trigger** — scoped to the columns a user edit touches;
+  editing the redirect template bumps the timestamp like any other
+  user-touched column.
+- **The two FTS5 virtual tables and their trigger set** — see below.
 
-`database::open` is the only entry point, and it always leaves the database
-at the current version. It also detects and upgrades **legacy** databases —
-anything with a `bookmarks` table but no `schema_migrations` row. Those go
-through `legacy_preclean` (drop the old unguarded FTS triggers, rename
-`deleted_at` → `trashed_at`, drop the dead `mime_type` column), the normal
-migration batch, then `legacy_postclean` (scrub trashed rows out of the
-main FTS index, and rebuild both indexes if archived rows leaked into the
-main one). The migration files are still written with `IF NOT EXISTS`
-safety nets because of this — one batch serves fresh and legacy databases
+One thing SQLite can't express idempotently is `ALTER TABLE ... ADD COLUMN`,
+so `migrations::init` adds the redirect-template column to pre-existing
+`bookmarks` tables (guarded by a column check) before the script runs.
+
+`database::open` is the only entry point. It also detects and repairs
+**legacy** databases — anything with a `bookmarks` table that still carries
+the old `deleted_at` recycle-bin column. Those go through `legacy_preclean`
+(drop the old unguarded FTS triggers, rename `deleted_at` → `trashed_at`,
+drop the dead `mime_type` column), the normal init batch, then
+`legacy_postclean` (scrub trashed rows out of the main FTS index, and
+rebuild both indexes if archived rows leaked into the main one). The
+idempotent script is what makes one batch serve fresh and legacy databases
 alike.
 
 ## Schema
@@ -55,6 +64,7 @@ bookmarks (
     id, title, url, description, domain, category_id,
     starred, keyword, note, favicon, thumbnail,
     visit_count, last_visited_at, is_archived, trashed_at,
+    redirect_template,
     created_at, updated_at,
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
 )
@@ -126,7 +136,7 @@ them is trivial (the legacy upgrade path does exactly that with
 ## Connections and pragmas
 
 `database::open` returns a plain `Connection` for one-shot callers (imports,
-migrations); `database::Db` is the long-lived serving shape — one writer
+schema init); `database::Db` is the long-lived serving shape — one writer
 plus four round-robin readers, every one inside its own `Mutex`, accessed
 only from `spawn_blocking`. See `architecture.md` for the reasoning; the
 short version is WAL makes concurrent readers + a writer safe, and

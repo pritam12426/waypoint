@@ -442,8 +442,13 @@ The overview:
 - `GET /keywords` — one keyword per line, active non-archived bookmarks
   only (empty string for bookmark-without-keyword), plain text.
 - `GET /keywords/{keyword}` — 307 redirect to the URL, recording a visit
-  fire-and-forget first. Unknown keyword → a plain-text 404 (this route is
-  outside `/api`, so it doesn't use the JSON error contract).
+  fire-and-forget first. The path segment may carry a trailing user value
+  (`/keywords/yt%20urMOM`): when the bookmark has a
+  `redirect_template`, that value (percent-encoded, space →
+  `%20`) fills the template's `{%s}` placeholder and the redirect targets the
+  result; otherwise — no template, no `{%s}`, or no trailing value — the
+  redirect targets the plain `url`. Unknown keyword → a plain-text 404 (this
+  route is outside `/api`, so it doesn't use the JSON error contract).
 - `GET /open/{id}` — same redirect by id, same visit recording, same
   plain-text 404.
 - everything else — the static frontend (`/` maps to `index.html`, unknown

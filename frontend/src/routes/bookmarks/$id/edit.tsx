@@ -36,6 +36,7 @@ function EditBookmarkPage() {
 		description: bm.description ?? "",
 		tags: bm.tags,
 		keyword: bm.keyword ?? "",
+		redirectTemplate: bm.redirect_template ?? "",
 		note: bm.note ?? "",
 		starred: bm.starred,
 		faviconMode:

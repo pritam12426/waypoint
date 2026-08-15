@@ -71,6 +71,22 @@ pub(super) fn validate_keyword(keyword: Option<&str>) -> Result<(), AppError> {
 	Ok(())
 }
 
+/// A redirect template must carry at least one `{%s}` placeholder — without
+/// one there is nothing for the address-bar value to fill, and the shortcut
+/// would silently always fall back to the plain URL. An empty string clears
+/// the template, so it is exempt.
+pub(super) fn validate_redirect_template(template: Option<&str>) -> Result<(), AppError> {
+	if let Some(t) = template
+		&& !t.is_empty()
+		&& !t.contains("{%s}")
+	{
+		return Err(AppError::invalid_payload(
+			"a redirect template must contain at least one {%s} placeholder",
+		));
+	}
+	Ok(())
+}
+
 /// Parses an optional `--*-after`/`--*-before` query string into the
 /// normalized `YYYY-MM-DD HH:MM:SS` UTC form `BookmarkFilter` expects.
 /// `end_of_day` picks day-start for `*_after` bounds and day-end for

@@ -27,6 +27,11 @@ const bookmarkFormSchema = z.object({
 	description: z.string(),
 	tags: z.array(z.string()),
 	keyword: z.string().transform((v) => v.trim().toLowerCase()),
+	// Mirrors the backend rule: a template must carry a `{%s}` placeholder
+	// unless empty (an empty value clears the template).
+	redirectTemplate: z.string().refine((v) => v === "" || v.includes("{%s}"), {
+		message: "A redirect template must contain {%s}",
+	}),
 	note: z.string(),
 	faviconUrl: z.string(),
 	faviconMode: mediaModeSchema,
@@ -45,6 +50,7 @@ export function toNewBookmark(values: BookmarkFormValues): NewBookmark {
 	if (values.description) body.description = values.description;
 	if (values.tags.length) body.tags = values.tags;
 	if (values.keyword) body.keyword = values.keyword;
+	if (values.redirectTemplate) body.redirect_template = values.redirectTemplate;
 	if (values.note) body.note = values.note;
 	if (values.starred) body.starred = values.starred;
 
@@ -69,6 +75,7 @@ export function toUpdateBookmark(values: BookmarkFormValues): UpdateBookmark {
 		description: values.description,
 		tags: values.tags,
 		keyword: values.keyword,
+		redirect_template: values.redirectTemplate,
 		note: values.note,
 		starred: values.starred,
 	};
@@ -120,6 +127,7 @@ export function BookmarkForm({
 			description: "",
 			tags: [],
 			keyword: "",
+			redirectTemplate: "",
 			note: "",
 			faviconUrl: "",
 			faviconMode: "auto",
@@ -207,6 +215,22 @@ export function BookmarkForm({
 				<Input id="keyword" placeholder="e.g. gh" {...register("keyword")} />
 				<p className="text-xs text-muted-foreground">
 					Type this into your browser bar to jump here.
+				</p>
+			</div>
+
+			<div className="space-y-1.5">
+				<Label htmlFor="redirectTemplate">Redirect template</Label>
+				<Input
+					id="redirectTemplate"
+					placeholder="https://example.com/search?q={%s}"
+					{...register("redirectTemplate")}
+				/>
+				{errors.redirectTemplate && (
+					<p className="text-xs text-destructive">{errors.redirectTemplate.message}</p>
+				)}
+				<p className="text-xs text-muted-foreground">
+					Type <code>keyword value</code> in your browser bar to fill this template's{" "}
+					<code>{"{%s}"}</code>. Leave blank to always jump to the URL.
 				</p>
 			</div>
 

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Category assigned to bookmarks that don't name one. Lives in the schema
-/// (seeded by the initial migration) and in the code paths that fall back
+/// (seeded by the schema init) and in the code paths that fall back
 /// to it, so the string has one canonical spelling.
 ///
 /// The single spelling matters: `database::categories` treats this name as
@@ -104,6 +104,11 @@ pub struct Bookmark {
 	pub category_name: Option<String>,
 	pub starred: bool,
 	pub keyword: Option<String>,
+	/// URL template with a `{%s}` placeholder (e.g.
+	/// `https://example.com/search?q={%s}`) that `/keywords/{keyword} <value>`
+	/// fills with the address-bar value instead of redirecting to `url`.
+	/// `None` keeps the plain redirect to `url`.
+	pub redirect_template: Option<String>,
 	pub note: Option<String>,
 	pub favicon: Option<String>,
 	pub thumbnail: Option<String>,
@@ -129,6 +134,9 @@ pub struct NewBookmark {
 	pub category: Option<String>,
 	pub tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
+	/// Optional URL template with a `{%s}` placeholder. When set (and
+	/// non-empty) it must contain `{%s}`; an empty string stores no template.
+	pub redirect_template: Option<String>,
 	pub note: Option<String>,
 	/// Favicon URL, or `""` to force the generic domain favicon
 	/// (skipping site-specific/custom favicon rules). `None` auto-resolves.
@@ -172,6 +180,9 @@ pub struct UpdateBookmark {
 	/// Subtractive: removes these tags from the existing set.
 	pub remove_tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
+	/// Tri-state like `keyword`: `Some("")` clears the template, `Some(x)`
+	/// sets it (must contain `{%s}`), `None` leaves it unchanged.
+	pub redirect_template: Option<String>,
 	pub note: Option<String>,
 	/// Favicon URL to set, `""` to reset to the generic domain favicon
 	/// (skipping site-specific rules), or `None` to leave unchanged.
@@ -221,6 +232,13 @@ impl UpdateBookmark {
 		match self.keyword.as_deref() {
 			Some("") => ops.push("cleared keyword".to_string()),
 			Some(k) => ops.push(format!("set keyword to \"{k}\"")),
+			None => {}
+		}
+		// Redirect template follows the same tri-state idiom: `Some("")`
+		// clears it, `Some(x)` sets it.
+		match self.redirect_template.as_deref() {
+			Some("") => ops.push("cleared redirect template".to_string()),
+			Some(_) => ops.push("set redirect template".to_string()),
 			None => {}
 		}
 		// Category is looked up by name downstream; a blank one is ignored.
@@ -318,6 +336,7 @@ impl UpdateBookmark {
 			|| self.add_tags.is_some()
 			|| self.remove_tags.is_some()
 			|| self.keyword.is_some()
+			|| self.redirect_template.is_some()
 			|| self.note.is_some()
 			|| self.favicon.is_some()
 			|| self.thumbnail.is_some()

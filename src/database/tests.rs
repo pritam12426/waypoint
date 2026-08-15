@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-//! In-crate tests for the persistence layer: migrations, idempotent reopen,
+//! In-crate tests for the persistence layer: schema init, idempotent reopen,
 //! and the legacy-database upgrade path.
 //!
 //! The legacy test is the important one — it rebuilds a *pre-versioned*
-//! database from the current schema (old column name, no
-//! `schema_migrations`, no FTS triggers, a trashed row leaking into the
-//! main index) and proves `database::open` repairs all of it. That's the
-//! safety net for real user data carried over from the old builds.
+//! database from the current schema (old column name, no FTS triggers, a
+//! trashed row leaking into the main index) and proves `database::open`
+//! repairs all of it. That's the safety net for real user data carried over
+//! from the old builds.
 
 use rusqlite::Connection;
 
@@ -53,18 +53,14 @@ fn table_names(conn: &Connection) -> Vec<String> {
 		.unwrap()
 }
 
-/// A brand-new database comes out at the latest schema version, with all
-/// expected tables and the default category seeded.
+/// A brand-new database comes out fully initialized: all expected tables and
+/// the default category seeded.
 #[test]
-fn fresh_database_reaches_current_version() {
+fn fresh_database_is_fully_initialized() {
 	silence_logs();
 	let (_dir, path) = temp_db();
 	{
 		let conn = open(&path).expect("open fresh database");
-		assert_eq!(
-			migrations::applied_version(&conn).unwrap(),
-			migrations::current_version()
-		);
 		let tables = table_names(&conn);
 		for expected in [
 			"bookmarks",
@@ -72,7 +68,6 @@ fn fresh_database_reaches_current_version() {
 			"bookmarks_fts_archived",
 			"bookmark_tags",
 			"categories",
-			"schema_migrations",
 			"tags",
 		] {
 			assert!(
@@ -92,25 +87,16 @@ fn fresh_database_reaches_current_version() {
 	}
 }
 
-/// Reopening the same database is a no-op: version stays put and the
-/// default-category seeding doesn't duplicate rows.
+/// Reopening the same database is a no-op: the idempotent schema init
+/// re-runs without error and the default-category seeding doesn't duplicate
+/// rows.
 #[test]
 fn reopen_is_idempotent() {
 	silence_logs();
 	let (_dir, path) = temp_db();
+	open(&path).unwrap();
 	{
 		let conn = open(&path).unwrap();
-		assert_eq!(
-			migrations::applied_version(&conn).unwrap(),
-			migrations::current_version()
-		);
-	}
-	{
-		let conn = open(&path).unwrap();
-		assert_eq!(
-			migrations::applied_version(&conn).unwrap(),
-			migrations::current_version()
-		);
 		// Still exactly one category row — seeding did not duplicate it.
 		let count: i64 = conn
 			.query_row("SELECT COUNT(*) FROM categories", [], |row| row.get(0))
@@ -127,10 +113,10 @@ fn legacy_database_is_upgraded() {
 	let (_dir, path) = temp_db();
 	// Build a "legacy" database: start from the current schema, then degrade
 	// it to look like a pre-versioned waypoint database (old column name,
-	// no FTS triggers, no schema_migrations).
+	// no FTS triggers, no redirect-template column).
 	{
 		let mut conn = Connection::open(&path).unwrap();
-		migrations::apply(&mut conn).unwrap();
+		migrations::init(&mut conn).unwrap();
 		// Insert bookmarks BEFORE degrading, while the triggers are still
 		// live: a legacy database indexed every row (trashed ones included)
 		// in the main index — that corruption is exactly what open() must
@@ -142,8 +128,6 @@ fn legacy_database_is_upgraded() {
 			 INSERT INTO bookmarks (title, url, domain, category_id, trashed_at) VALUES ('gone', 'https://b.example', 'b.example', 1, CURRENT_TIMESTAMP);",
 		)
 		.unwrap();
-		// Drop the schema_migrations tracking to simulate pre-versioned era.
-		conn.execute_batch("DROP TABLE schema_migrations;").unwrap();
 		// Drop FTS triggers (required before the column rename, same reason
 		// as in legacy_preclean).
 		for trigger in super::LEGACY_FTS_TRIGGERS {
@@ -152,16 +136,17 @@ fn legacy_database_is_upgraded() {
 		}
 		conn.execute_batch("ALTER TABLE bookmarks RENAME COLUMN trashed_at TO deleted_at;")
 			.unwrap();
+		// The redirect-template column postdates the legacy era — a
+		// pre-versioned database never had it, so drop it to let the init
+		// script's Rust-side guard add it back.
+		conn.execute_batch("ALTER TABLE bookmarks DROP COLUMN redirect_template;")
+			.unwrap();
 	}
 
 	// Reopening through the public entry point repairs everything.
 	let conn = open(&path).expect("open legacy database");
-	assert_eq!(
-		migrations::applied_version(&conn).unwrap(),
-		migrations::current_version()
-	);
 
-	// Column renamed back.
+	// Column renamed back (and the redirect-template column re-added).
 	let cols: Vec<String> = {
 		let mut stmt = conn
 			.prepare("SELECT name FROM pragma_table_info('bookmarks')")
@@ -178,6 +163,10 @@ fn legacy_database_is_upgraded() {
 	assert!(
 		!cols.iter().any(|c| c == "deleted_at"),
 		"deleted_at still present: {cols:?}"
+	);
+	assert!(
+		cols.iter().any(|c| c == "redirect_template"),
+		"redirect_template missing: {cols:?}"
 	);
 
 	// The guarded FTS trigger set is back.
@@ -226,6 +215,7 @@ fn plain_bookmark(url: &str) -> NewBookmark {
 		category: None,
 		tags: None,
 		keyword: None,
+		redirect_template: None,
 		note: None,
 		favicon: None,
 		thumbnail: None,
@@ -303,6 +293,7 @@ fn explicit_media_fields_are_kept() {
 			category: None,
 			tags: None,
 			keyword: None,
+			redirect_template: None,
 			note: None,
 			favicon: Some("https://cdn.example/custom-icon.png".to_string()),
 			thumbnail: Some("https://cdn.example/custom-thumb.png".to_string()),
@@ -556,6 +547,7 @@ fn insert_sentinel_forces_generic_media() {
 			category: None,
 			tags: None,
 			keyword: None,
+			redirect_template: None,
 			note: None,
 			favicon: Some(String::new()),
 			thumbnail: Some(String::new()),
@@ -594,6 +586,7 @@ fn update_sentinel_resets_media() {
 			category: None,
 			tags: None,
 			keyword: None,
+			redirect_template: None,
 			note: None,
 			favicon: Some("https://cdn.example/custom-icon.png".to_string()),
 			thumbnail: Some("https://cdn.example/custom-thumb.png".to_string()),
@@ -1326,6 +1319,7 @@ fn plain_bookmark_media_defaults() -> NewBookmark {
 		category: None,
 		tags: None,
 		keyword: None,
+		redirect_template: None,
 		note: None,
 		favicon: None,
 		thumbnail: None,

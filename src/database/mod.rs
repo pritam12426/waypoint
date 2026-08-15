@@ -12,11 +12,11 @@
 //! `tokio::task::spawn_blocking`; never share a raw `Connection` across
 //! tasks directly — see the project notes in AGENTS.md.
 //!
-//! Migration policy: forward-only, versioned, tracked in
-//! `schema_migrations`. `open()` is the only entry point and always leaves
-//! the database at `migrations::current_version()`. Pool readers are opened
-//! *after* the writer has finished migrating, so they never see a partial
-//! schema.
+//! Schema policy: one idempotent init script
+//! (`migrations/0001_init.up.sql`, run via `migrations::init`) applied on
+//! every startup — no versioned migrations, no tracking table. `open()` is
+//! the only entry point. Pool readers are opened *after* the writer has
+//! finished initializing, so they never see a partial schema.
 //!
 //! # Layout
 //!
@@ -24,7 +24,7 @@
 //! * `tags` / `categories` — the two taxonomies and the bookmark↔tag links
 //! * `visits` — visit tracking and the visit-derived stats
 //! * `stats` — aggregate queries (overview, activity, hygiene, ...)
-//! * `migrations` — the versioned, forward-only migration runner
+//! * `migrations` — the one-shot idempotent schema initializer
 //!
 //! Everything here returns `anyhow::Result`; no SQL is duplicated between
 //! handlers because they all call these functions.
@@ -58,7 +58,7 @@ pub const READ_POOL_SIZE: usize = 4;
 /// WAL is what makes this safe: readers see a consistent snapshot while the
 /// writer commits, so a page load never blocks a visit write. `open()`
 /// still returns a single plain `Connection` for one-shot callers (imports,
-/// migrations); the pool is the long-lived serving shape.
+/// schema init); the pool is the long-lived serving shape.
 #[derive(Debug)]
 pub struct Db {
 	writer: Mutex<Connection>,
@@ -67,7 +67,7 @@ pub struct Db {
 }
 
 impl Db {
-	/// Opens the database (the writer runs migrations + seed) and spawns
+	/// Opens the database (the writer runs the schema init + seed) and spawns
 	/// `READ_POOL_SIZE` reader connections against the same file. Readers
 	/// open *after* the writer is fully migrated, so they never see a
 	/// half-applied schema.
@@ -232,8 +232,8 @@ pub fn prune_backups(dir: &Path, keep: usize) -> usize {
 /// writes into an FTS5 virtual table.
 ///
 /// These are the *old* trigger names a pre-versioned build could have
-/// installed; migration 0001 then re-creates its own guarded set with the
-/// same names via `CREATE TRIGGER IF NOT EXISTS`.
+/// installed; the schema init script then re-creates its own guarded set
+/// with the same names via `CREATE TRIGGER IF NOT EXISTS`.
 const LEGACY_FTS_TRIGGERS: &[&str] = &[
 	"bookmarks_fts_insert",
 	"bookmarks_fts_delete",
@@ -250,16 +250,15 @@ const LEGACY_FTS_TRIGGERS: &[&str] = &[
 	"bookmarks_fts_unarchive",
 ];
 
-/// Opens (creating if needed) the waypoint database at `path`, applies any
-/// pending versioned migrations (upgrading a pre-versioned database along
-/// the way), and seeds the default category. Returns a ready-to-use
-/// connection.
+/// Opens (creating if needed) the waypoint database at `path`, applies the
+/// idempotent schema init script, and seeds the default category. Returns a
+/// ready-to-use connection.
 ///
-/// The upgrade pipeline for a database that predates versioning is:
-/// `legacy_preclean` (make the old schema match what 0001 expects) →
-/// `migrations::apply` (the normal batch, which is idempotent and safe on
-/// both fresh and legacy DBs) → `legacy_postclean` (repair search-index
-/// state the old triggers let rot).
+/// The repair pipeline for a database that predates versioning is:
+/// `legacy_preclean` (make the old schema match what the init script
+/// expects) → `migrations::init` (the same idempotent batch, safe on both
+/// fresh and legacy DBs) → `legacy_postclean` (repair search-index state
+/// the old triggers let rot).
 pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
 	open_with_flags(path.as_ref(), rusqlite::OpenFlags::default())
 }
@@ -274,20 +273,20 @@ fn open_with_flags<P: AsRef<Path>>(path: P, flags: rusqlite::OpenFlags) -> Resul
 	apply_pragmas(&mut conn)?;
 
 	// Detect pre-versioned databases so they get the pre/post clean passes
-	// around the migration batch.
+	// around the schema init batch.
 	let legacy = is_legacy_schema(&conn)?;
 	if legacy {
 		crate::log_info!(
-			"legacy database detected at {} — running pre/post migration upgrade",
+			"legacy database detected at {} — running pre/post schema repair",
 			path.display()
 		);
-		legacy_preclean(&conn).context("failed to upgrade legacy schema (pre-migration)")?;
+		legacy_preclean(&conn).context("failed to repair legacy schema (pre-init)")?;
 	}
 
-	migrations::apply(&mut conn).context("failed to apply migrations")?;
+	migrations::init(&mut conn).context("failed to initialize schema")?;
 
 	if legacy {
-		legacy_postclean(&conn).context("failed to upgrade legacy schema (post-migration)")?;
+		legacy_postclean(&conn).context("failed to repair legacy schema (post-init)")?;
 	}
 
 	categories::ensure_default(&conn).context("failed to seed default category")?;
@@ -297,7 +296,7 @@ fn open_with_flags<P: AsRef<Path>>(path: P, flags: rusqlite::OpenFlags) -> Resul
 }
 
 /// Opens a pooled reader connection: same pragmas as the writer, but no
-/// migrations or seeding — the writer is guaranteed to have run them first
+/// schema init or seeding — the writer is guaranteed to have run them first
 /// (`Db::open` opens readers only after the writer is ready).
 fn open_reader(path: &Path) -> Result<Connection> {
 	crate::log_trace!("opening pooled reader connection for {}", path.display());
@@ -321,7 +320,7 @@ fn open_reader_with_flags(uri: &str) -> Result<Connection> {
 /// set outside any transaction.
 fn apply_pragmas(conn: &mut Connection) -> Result<()> {
 	// Must be set outside any transaction — it is a no-op inside one — and
-	// before the migration batch touches data. FK enforcement is what makes
+	// before the schema init batch touches data. FK enforcement is what makes
 	// `ON DELETE CASCADE` (tags, bookmark_tags) and the category reassignment
 	// in `categories::delete` behave correctly.
 	conn.pragma_update(None, "foreign_keys", true)
@@ -359,38 +358,37 @@ fn apply_pragmas(conn: &mut Connection) -> Result<()> {
 }
 
 /// A "legacy" database is one written by the pre-versioned waypoint builds:
-/// it already has the `bookmarks` table but no `schema_migrations` row
-/// (fresh databases get both from migration 0001).
+/// it already has the `bookmarks` table carrying the old `deleted_at`
+/// recycle-bin column (every schema since then uses `trashed_at`).
 ///
-/// Checking `sqlite_master` (not data) means an empty-but-existing schema
-/// is classified correctly, and a truly empty file (no tables at all) is
-/// fresh — migration 0001 builds everything, no legacy cleanup needed.
+/// Checking `sqlite_master` and the column list (not data) means an
+/// empty-but-existing schema is classified correctly, and a truly empty file
+/// (no tables at all) is fresh — the init script builds everything, no
+/// legacy cleanup needed.
 fn is_legacy_schema(conn: &Connection) -> Result<bool> {
-	let has_bookmarks: bool = conn
-		.query_row(
-			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookmarks'",
-			[],
-			|_| Ok(true),
-		)
-		.optional()?
-		.unwrap_or(false);
-	if !has_bookmarks {
+	if !has_table(conn, "bookmarks")? {
 		return Ok(false);
 	}
-	let has_migrations: bool = conn
+	has_column(conn, "bookmarks", "deleted_at")
+}
+
+/// Whether a table with `name` exists in the schema.
+pub(crate) fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+	let exists: bool = conn
 		.query_row(
-			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-			[],
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+			params![name],
 			|_| Ok(true),
 		)
 		.optional()?
 		.unwrap_or(false);
-	Ok(!has_migrations)
+	Ok(exists)
 }
 
-/// Whether `table` currently has `column` — used by the legacy upgrade to
-/// conditionally rename/drop columns that only some old builds created.
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+/// Whether `table` currently has `column` — used by the schema init to
+/// conditionally add the redirect-template column and by the legacy upgrade
+/// to conditionally rename/drop columns that only some old builds created.
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 	let found: bool = conn
 		.query_row(
 			"SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
@@ -402,11 +400,11 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 	Ok(found)
 }
 
-/// Pre-migration half of the legacy upgrade: make the old schema look like
-/// the state migration 0001 expects to build on. Runs only for databases
-/// that predate `schema_migrations`.
+/// Pre-init half of the legacy upgrade: make the old schema look like the
+/// state the init script expects to build on. Runs only for pre-versioned
+/// databases (marked by the `deleted_at` column).
 fn legacy_preclean(conn: &Connection) -> Result<()> {
-	// Drop the old FTS trigger set so migration 0001's guarded definitions
+	// Drop the old FTS trigger set so the init script's guarded definitions
 	// install cleanly (they would otherwise be shadowed by IF NOT EXISTS).
 	for trigger in LEGACY_FTS_TRIGGERS {
 		conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
@@ -432,7 +430,7 @@ fn legacy_preclean(conn: &Connection) -> Result<()> {
 	Ok(())
 }
 
-/// Post-migration half of the legacy upgrade: repair search-index state that
+/// Post-init half of the legacy upgrade: repair search-index state that
 /// the old triggers let rot.
 ///
 /// Trash cleanup: databases predating the `bookmarks_fts_trash` trigger may

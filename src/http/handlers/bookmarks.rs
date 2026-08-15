@@ -20,7 +20,7 @@ use utoipa::IntoParams;
 
 use super::shared::{
 	X_NEXT_CURSOR, X_TOTAL_COUNT, parse_bound, validate_bounds, validate_id, validate_keyword,
-	validate_limit, validate_offset,
+	validate_limit, validate_offset, validate_redirect_template,
 };
 use crate::{
 	database::bookmarks as bm_db,
@@ -314,6 +314,7 @@ pub async fn create_bookmark(
 		));
 	}
 	validate_keyword(new.keyword.as_deref())?;
+	validate_redirect_template(new.redirect_template.as_deref())?;
 
 	// Friendly duplicate rejection first, on a *reader*: a colliding save
 	// must not trigger a needless network fetch or cache write. Media
@@ -443,6 +444,7 @@ pub async fn update_bookmark(
 		));
 	}
 	validate_keyword(update.keyword.as_deref())?;
+	validate_redirect_template(update.redirect_template.as_deref())?;
 
 	// Read the current row first (a reader; no writer yet) — media
 	// resolution needs it, and a missing id must 404 before any fetch.
@@ -855,6 +857,7 @@ pub async fn bulk_update_bookmarks(
 		));
 	}
 	validate_keyword(update.keyword.as_deref())?;
+	validate_redirect_template(update.redirect_template.as_deref())?;
 
 	// Pass 1 (off the writer): read each row, duplicate-check, resolve
 	// media. Any failure here aborts before a single write, so a bad id or

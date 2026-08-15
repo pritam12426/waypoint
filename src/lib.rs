@@ -13,7 +13,7 @@
 //! * `model`    — pure data structs shared by every layer
 //! * `shared`   — cross-layer helpers (URL/domain extraction, validation)
 //! * `config`   — server defaults + `WAYPOINTD_*` env accessors
-//! * `database` — SQLite persistence: migrations + one module per domain
+//! * `database` — SQLite persistence: idempotent schema init + one module per domain
 //! * `core`     — business rules: media resolution (with a persistent
 //!   fetch-result cache), import/export, link checker
 //! * `http`     — the axum server, calls `core`/`database`

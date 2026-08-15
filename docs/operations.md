@@ -31,7 +31,7 @@ WAYPOINTD_DB_FILE="$HOME/.waypoint/waypoint.sqlite" \
   ./waypointd
 ```
 
-The first start creates the database, applies the migrations, and seeds the
+The first start creates the database, applies the schema, and seeds the
 `Uncategorized` category. The server prints `waypointd listening on
 http://localhost:8080` and logs a request span per request. SIGINT and
 SIGTERM both trigger a graceful shutdown — the listener stops accepting,

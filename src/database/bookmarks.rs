@@ -47,8 +47,9 @@ const MAX_UNPAGINATED: i64 = 100_000;
 /// `attach_tags` after the row query.
 const SELECT_BOOKMARK_FIELDS: &str = "
     b.id, b.title, b.url, b.description, b.domain, b.category_id, c.name as category_name,
-    b.starred, b.keyword, b.note, b.favicon, b.thumbnail, b.visit_count,
-    b.last_visited_at, b.is_archived, b.created_at, b.updated_at, b.trashed_at
+    b.starred, b.keyword, b.redirect_template, b.note, b.favicon,
+    b.thumbnail, b.visit_count, b.last_visited_at, b.is_archived, b.created_at,
+    b.updated_at, b.trashed_at
 ";
 
 /// Maps one SQL row onto a `Bookmark`, addressing columns by name (so the
@@ -66,6 +67,7 @@ fn row_to_bookmark(row: &Row) -> rusqlite::Result<Bookmark> {
 		category_name: row.get("category_name")?,
 		starred: row.get::<_, i64>("starred")? != 0,
 		keyword: row.get("keyword")?,
+		redirect_template: row.get("redirect_template")?,
 		note: row.get("note")?,
 		favicon: row.get("favicon")?,
 		thumbnail: row.get("thumbnail")?,
@@ -278,8 +280,8 @@ pub fn insert_resolved(
 	if let Err(err) = conn.execute(
 		"INSERT INTO bookmarks
             (title, url, description, domain, category_id, starred, keyword, note,
-             favicon, thumbnail, is_archived)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             favicon, thumbnail, is_archived, redirect_template)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
 		params![
 			title,
 			new.url,
@@ -292,6 +294,7 @@ pub fn insert_resolved(
 			media.favicon,
 			media.thumbnail,
 			new.is_archived.unwrap_or(false),
+			new.redirect_template.clone().filter(|t| !t.is_empty()),
 		],
 	) {
 		// A concurrent writer can slip a duplicate past the pre-checks;
@@ -750,6 +753,12 @@ pub fn update_resolved(
 		Some(k) => Some(k.clone()),
 		None => existing.keyword.clone(),
 	};
+	// Same tri-state as `keyword`: empty clears, missing leaves alone.
+	let redirect_template = match &update.redirect_template {
+		Some(t) if t.is_empty() => None,
+		Some(t) => Some(t.clone()),
+		None => existing.redirect_template.clone(),
+	};
 	let description = update.description.clone().or(existing.description.clone());
 	let note = update.note.clone().or(existing.note.clone());
 
@@ -778,6 +787,7 @@ pub fn update_resolved(
 		|| starred != existing.starred
 		|| is_archived != existing.is_archived
 		|| keyword != existing.keyword
+		|| redirect_template != existing.redirect_template
 		|| category_id != existing.category_id;
 
 	if changed {
@@ -785,8 +795,9 @@ pub fn update_resolved(
 			"UPDATE bookmarks SET
 	            title = ?1, url = ?2, description = ?3, domain = ?4, category_id = ?5,
 	            starred = ?6, keyword = ?7, note = ?8, favicon = ?9, thumbnail = ?10,
-	            is_archived = ?11, updated_at = CURRENT_TIMESTAMP
-	         WHERE id = ?12 AND trashed_at IS NULL",
+	            is_archived = ?11, redirect_template = ?12,
+	            updated_at = CURRENT_TIMESTAMP
+	         WHERE id = ?13 AND trashed_at IS NULL",
 			params![
 				title,
 				url,
@@ -799,6 +810,7 @@ pub fn update_resolved(
 				favicon,
 				thumbnail,
 				is_archived,
+				redirect_template,
 				id,
 			],
 		) {

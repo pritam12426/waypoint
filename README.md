@@ -74,7 +74,7 @@ WAYPOINTD_SERVE_TOKEN="pick-a-long-random-string" ./target/release/waypointd
 ```
 
 Open http://localhost:8080 and paste the token when the app asks. The first
-start creates the database, runs the migrations, and seeds an
+start creates the database, applies the schema, and seeds an
 `Uncategorized` category. SIGINT and SIGTERM both shut down gracefully: the
 listener stops accepting, in-flight requests finish, and the WAL gets
 checkpointed before the connections close.
@@ -173,7 +173,7 @@ lives in `docs/` — `docs/operations.md` is the natural next read.
 
 - [docs/architecture.md](docs/architecture.md) — crate layout and the threading model.
 - [docs/api.md](docs/api.md) — every endpoint, auth, pagination, error codes.
-- [docs/database.md](docs/database.md) — schema, migrations, full-text search, WAL.
+- [docs/database.md](docs/database.md) — schema, full-text search, WAL.
 - [docs/operations.md](docs/operations.md) — env vars, logging, media cache, backups.
 - `frontend/` — the React 19 / Vite / TanStack Router SPA.
 

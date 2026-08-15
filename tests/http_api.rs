@@ -11,7 +11,9 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use waypointd::database;
+use waypointd::database::bookmarks as bm_db;
 use waypointd::http::{AppState, Jobs, app};
+use waypointd::model::UpdateBookmark;
 
 static SILENCE: Once = Once::new();
 
@@ -309,6 +311,191 @@ async fn keyword_redirect_is_public_and_visits_get_tracked() {
 		.unwrap()
 		.to_string();
 	assert_eq!(location, "https://rust-lang.org");
+}
+
+#[tokio::test]
+async fn keyword_redirect_fills_template_with_encoded_user_value() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://www.youtube.com",
+				"keyword": "yt",
+				"redirect_template": "https://www.youtube.com/results?search_query={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+
+	// Browser bar sends the value as part of the same segment: `%20` is
+	// decoded by axum's Path extractor, split off the keyword, then
+	// re-encoded into the template placeholder (space → %20).
+	let res = request(
+		&state,
+		Method::GET,
+		"/keywords/yt%20saying%20hi%20to%20urMOM",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+	let location = res
+		.headers()
+		.get(header::LOCATION)
+		.and_then(|v| v.to_str().ok())
+		.unwrap()
+		.to_string();
+	assert_eq!(
+		location,
+		"https://www.youtube.com/results?search_query=saying%20hi%20to%20urMOM"
+	);
+}
+
+#[tokio::test]
+async fn keyword_redirect_without_user_value_falls_back_to_url() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://www.youtube.com",
+				"keyword": "yt",
+				"redirect_template": "https://www.youtube.com/results?search_query={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+
+	// A bare keyword (no trailing value) keeps the historical behavior and
+	// redirects to the plain `url`.
+	let res = request(&state, Method::GET, "/keywords/yt", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+	let location = res
+		.headers()
+		.get(header::LOCATION)
+		.and_then(|v| v.to_str().ok())
+		.unwrap()
+		.to_string();
+	assert_eq!(location, "https://www.youtube.com");
+}
+
+#[tokio::test]
+async fn keyword_redirect_falls_back_when_template_lacks_placeholder() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://www.youtube.com",
+				"keyword": "yt",
+				"redirect_template": "https://www.youtube.com/results?search_query={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let id = created["id"].as_i64().unwrap();
+
+	// The API forbids saving a template without {%s}, so corrupt it at the
+	// DB layer (as a legacy row could) to exercise the defensive fallback.
+	let db = state.db.clone();
+	tokio::task::spawn_blocking(move || {
+		bm_db::update(
+			&db.writer(),
+			id,
+			&UpdateBookmark {
+				redirect_template: Some("https://www.youtube.com/nope".into()),
+				..Default::default()
+			},
+		)
+	})
+	.await
+	.unwrap()
+	.unwrap();
+
+	let res = request(&state, Method::GET, "/keywords/yt%20x", Body::empty()).await;
+	assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+	let location = res
+		.headers()
+		.get(header::LOCATION)
+		.and_then(|v| v.to_str().ok())
+		.unwrap()
+		.to_string();
+	assert_eq!(location, "https://www.youtube.com");
+}
+
+#[tokio::test]
+async fn redirect_template_requires_placeholder_on_create_and_update() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Create with a template lacking {%s} → 400.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://www.youtube.com",
+				"keyword": "yt",
+				"redirect_template": "https://www.youtube.com/results?search_query=",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+	// A valid bookmark, then updating its template to one lacking {%s} → 400.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://www.youtube.com",
+				"keyword": "yt",
+				"redirect_template": "https://www.youtube.com/results?search_query={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let id = created["id"].as_i64().unwrap();
+
+	let res = request(
+		&state,
+		Method::PUT,
+		&format!("/api/bookmarks/{id}"),
+		Body::from(
+			json!({
+				"redirect_template": "https://www.youtube.com/nope",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

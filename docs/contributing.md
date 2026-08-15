@@ -94,14 +94,15 @@ Nothing in `core::media`, `core::fetch`, or the database layer changes.
 Tests for the site's URL logic live in the site module's `#[cfg(test)]`
 block, next to the code.
 
-## Adding a migration
+## Changing the schema
 
-One new `src/database/migrations/NNNN_name.up.sql` (the number must sort
-after the current max) and one entry in the `MIGRATIONS` array in
-`src/database/migrations.rs`. Migrations run once, forward-only, recorded in
-`schema_migrations`. Write the SQL with `IF NOT EXISTS` safety nets — the
-legacy-upgrade path runs fresh and legacy databases through the same batch.
-There's no rollback file; down migrations are a deliberate non-feature.
+Edit `src/database/migrations/0001_init.up.sql` — it's the single schema
+file, re-run idempotently on every startup, so there's no migration version
+to add and no tracking table to update. Write the change with `IF NOT
+EXISTS` safety nets (the legacy-upgrade path runs fresh and legacy
+databases through the same batch). If it adds a column to an existing
+table, put it in the `CREATE TABLE` *and* in the guarded `ALTER` in
+`migrations::init` — SQLite can't express `ADD COLUMN` idempotently.
 
 ## Things that look like bugs but aren't
 

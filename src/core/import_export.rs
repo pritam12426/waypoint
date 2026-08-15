@@ -238,6 +238,7 @@ pub fn import_html(
 			),
 			tags: tags.clone(),
 			keyword: None,
+			redirect_template: None,
 			note: None,
 			favicon: None,
 			thumbnail: None,

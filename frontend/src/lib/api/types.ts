@@ -14,6 +14,7 @@ export interface Bookmark {
 	category: string;
 	tags: string[];
 	keyword: string | null;
+	redirect_template: string | null;
 	visit_count: number;
 	starred: boolean;
 	is_archived: boolean;
@@ -31,6 +32,9 @@ export interface NewBookmark {
 	category?: string;
 	tags?: string[];
 	keyword?: string;
+	/** URL template with a `{%s}` placeholder; typing `keyword <value>` in the
+	 * browser bar redirects there instead of to `url`. */
+	redirect_template?: string;
 	favicon?: string;
 	thumbnail?: string;
 	starred?: boolean;
@@ -49,6 +53,9 @@ export interface UpdateBookmark {
 	category?: string;
 	tags?: string[];
 	keyword?: string;
+	/** Tri-state like `keyword`: `""` clears, a value sets (must contain
+	 * `{%s}`), `undefined` leaves unchanged. */
+	redirect_template?: string;
 	favicon?: string;
 	thumbnail?: string;
 	starred?: boolean;
