@@ -1,0 +1,50 @@
+# waypointd systemd unit (Debian / Ubuntu / systemd distros)
+#
+# Install:
+#   sudo cp deploy/linux/waypointd.service /etc/systemd/system/
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin waypointd
+#   sudo install -d -o waypointd -g waypointd /var/lib/waypoint \
+#     /var/lib/waypoint/backups /var/lib/waypoint/cache
+#   # put the token in a root-only env file (chmod 600), then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now waypointd
+#
+# State lives under /var/lib/waypoint; logs go to the journal:
+#   journalctl -u waypointd -f
+
+[Unit]
+Description=waypointd bookmark server
+Documentation=file:///usr/share/doc/waypointd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waypointd
+Group=waypointd
+WorkingDirectory=/var/lib/waypoint
+
+# The bearer token (and anything you'd rather not have in the unit file)
+# goes in /etc/waypointd.env as WAYPOINTD_SERVE_TOKEN=... — the leading
+# "-" means systemd tolerates the file being absent.
+EnvironmentFile=-/etc/waypointd.env
+Environment=WAYPOINTD_DB_FILE=/var/lib/waypoint/waypoint.sqlite
+Environment=WAYPOINTD_SERVE_HOST=localhost
+Environment=WAYPOINTD_SERVE_PORT=8080
+Environment=WAYPOINTD_LOG_LEVEL=info
+Environment=WAYPOINTD_LOG_FORMAT=human-readable
+Environment=WAYPOINTD_BACKUP_DIR=/var/lib/waypoint/backups
+Environment=WAYPOINTD_BACKUP_INTERVAL_SECS=86400
+Environment=WAYPOINTD_BACKUP_KEEP=7
+Environment=WAYPOINTD_CACHE_DIR=/var/lib/waypoint/cache
+
+ExecStart=/usr/local/bin/waypointd
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# SIGTERM triggers waypointd's graceful shutdown (finishes in-flight
+# requests, checkpoints the WAL). KillMode is the safe default.
+
+[Install]
+WantedBy=multi-user.target

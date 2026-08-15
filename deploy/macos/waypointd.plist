@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	waypointd LaunchAgent (macOS)
+
+	Runs waypointd as a user agent: starts at login, keeps it alive across
+	crashes. Install to ~/Library/LaunchAgents/waypointd.plist and load with:
+
+		launchctl load   ~/Library/LaunchAgents/waypointd.plist   (or use `bootstrap`)
+		launchctl start  com.waypointd.server
+		launchctl stop   com.waypointd.server
+		launchctl unload ~/Library/LaunchAgents/waypointd.plist
+
+	For a system-wide daemon that starts before login, move the file to
+	/Library/LaunchDaemons/, use /Library/LaunchDaemons/ paths below, and
+	manage it with `sudo launchctl bootstrap system ...`.
+
+	REPLACE /Users/YOUR_USERNAME and YOUR_LONG_RANDOM_TOKEN before loading.
+	launchd does not expand ~ or env vars here — absolute paths only.
+-->
+<plist version="1.0">
+	<dict>
+		<key>Label</key>
+		<string>com.waypointd.server</string>
+
+		<key>ProgramArguments</key>
+		<array>
+			<!-- If you installed via `cargo install`, the path is
+			     /Users/YOUR_USERNAME/.cargo/bin/waypointd instead. -->
+			<string>/usr/local/bin/waypointd</string>
+		</array>
+
+		<key>WorkingDirectory</key>
+		<string>/Users/YOUR_USERNAME/.waypoint</string>
+
+		<key>EnvironmentVariables</key>
+		<dict>
+			<key>WAYPOINTD_DB_FILE</key>
+			<string>/Users/YOUR_USERNAME/.waypoint/waypoint.sqlite</string>
+			<key>WAYPOINTD_SERVE_TOKEN</key>
+			<string>YOUR_LONG_RANDOM_TOKEN</string>
+			<key>WAYPOINTD_SERVE_HOST</key>
+			<string>localhost</string>
+			<key>WAYPOINTD_SERVE_PORT</key>
+			<string>8080</string>
+			<key>WAYPOINTD_LOG_LEVEL</key>
+			<string>info</string>
+			<key>WAYPOINTD_LOG_FORMAT</key>
+			<string>human-readable</string>
+			<key>WAYPOINTD_BACKUP_DIR</key>
+			<string>/Users/YOUR_USERNAME/.waypoint/backups</string>
+			<key>WAYPOINTD_BACKUP_INTERVAL_SECS</key>
+			<string>86400</string>
+			<key>WAYPOINTD_BACKUP_KEEP</key>
+			<string>7</string>
+			<key>WAYPOINTD_CACHE_DIR</key>
+			<string>/Users/YOUR_USERNAME/.waypoint/cache</string>
+		</dict>
+
+		<!-- All logs go to stderr; launchd appends it to this file. -->
+		<key>StandardErrorPath</key>
+		<string>/Users/YOUR_USERNAME/.waypoint/waypointd.log</string>
+
+		<key>RunAtLoad</key>
+		<true/>
+
+		<!-- Restart whenever the process exits without a clean signal, but
+		     throttle respawns to 10s. -->
+		<key>KeepAlive</key>
+		<dict>
+			<key>SuccessfulExit</key>
+			<false/>
+		</dict>
+		<key>ThrottleInterval</key>
+		<integer>10</integer>
+
+		<key>ProcessType</key>
+		<string>Background</string>
+	</dict>
+</plist>
