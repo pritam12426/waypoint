@@ -7,7 +7,9 @@ isn't ceremony — it exists so integration tests under `tests/` can exercise
 the real code, and so nothing has to pretend to be a command-line tool. The
 old project had a CLI, an HTTP server, and a shared core that all had to
 agree with each other; this one has a single front door (`http`), and that
-was the whole point of the rewrite.
+was the whole point of the rewrite. (The binary does understand three
+informational flags — `--help`, `--version`, `--config` — but they print
+and exit; they read `config` and never configure anything.)
 
 ## Module layering
 

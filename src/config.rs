@@ -7,8 +7,10 @@
 //! Server configuration — environment-variable driven, with the defaults
 //! defined once here.
 //!
-//! `waypointd` is server-only: there are no CLI flags, so every setting
-//! comes from the environment (`WAYPOINTD_*`). Keeping the defaults here
+//! `waypointd` is server-only: every setting comes from the environment
+//! (`WAYPOINTD_*`). The only CLI surface is three informational flags in
+//! `main.rs` (`--help`/`--version`/`--config`) that print and exit — they
+//! read this module but never configure anything. Keeping the defaults here
 //! (rather than scattered across `main.rs` and `http`) means one value
 //! can't drift between layers.
 //!

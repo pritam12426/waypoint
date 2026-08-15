@@ -15,6 +15,7 @@ cross-references the others when it matters.
 - [contributing.md](contributing.md) — building, testing, and the
   conventions to follow before you touch code.
 
-waypointd was written from scratch. There is only a server — no CLI, no
+waypointd was written from scratch. There is only a server — no CLI to
+speak of (just `--help`/`--version`/`--config`, which print and exit), no
 legacy, nothing carried over from an earlier design — so the codebase
 starts from what a personal bookmark server actually needs.

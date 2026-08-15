@@ -108,7 +108,7 @@ pub enum LogFormat {
 impl LogFormat {
 	/// Parses a format from a string (used for the `WAYPOINTD_LOG_FORMAT`
 	/// env override).
-	fn from_env_str(s: &str) -> Option<Self> {
+	pub fn from_env_str(s: &str) -> Option<Self> {
 		match s.to_ascii_lowercase().as_str() {
 			"human-readable" | "pretty" | "text" | "human" => Some(LogFormat::Pretty),
 			"json" => Some(LogFormat::Json),

@@ -1,8 +1,10 @@
 # Operations
 
-waypointd is configured entirely by environment variables — there are no CLI
-flags, no config file, no dotenv. The defaults are chosen for a personal,
-localhost-bound tool, and every one of them can be overridden.
+waypointd is configured entirely by environment variables — the only CLI
+flags are the informational `--help`/`--version`/`--config` (they print and
+exit; they configure nothing). There is no config file, no dotenv. The
+defaults are chosen for a personal, localhost-bound tool, and every one of
+them can be overridden.
 
 ## Environment variables
 

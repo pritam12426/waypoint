@@ -21,8 +21,10 @@ flag and work as usual. Run the server with:
 cargo run -- serve
 ```
 
-— no, wait, that's a lie. There is no `serve` subcommand anymore; waypointd
-has no CLI at all. `cargo run` runs the server. That's the whole binary.
+— no, wait, that's a lie. There is no `serve` subcommand. The only CLI
+surface is three informational flags — `-?`/`--help`, `-v`/`--version`,
+`-c`/`--config` — which print and exit; they live in `main.rs` and never
+configure anything. `cargo run` runs the server. That's the whole binary.
 
 ## The frontend build state (read this before building)
 
@@ -40,10 +42,8 @@ unblocks compilation, but the `static_frontend_is_served` test stays red
 until `bun run build` in `frontend/` regenerates a real build.
 
 The frontend itself (React 19 + TypeScript, Vite, TanStack Router/Query,
-Tailwind v4, Biome, bun) is real source on disk but **not committed** —
-`git status` shows `frontend/` as untracked. Do not `git add` it without
-asking. `frontend/dist/` and `node_modules/` are git-excluded; if the
-frontend is ever committed, `dist/` must stay out.
+Tailwind v4, Biome, bun) is committed source; only `frontend/dist/` and
+`node_modules/` are git-excluded.
 
 ## Testing
 

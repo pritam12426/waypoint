@@ -4,6 +4,7 @@
 	edition = "2024"
 	description = "A modern, self-hosted bookmark server with keyword shortcuts and full-text search"
 	license = "MIT"
+	authors = ["Pritam"]
 
 	# `src/main.rs` is the default binary entry point for a package named
 	# "waypointd" — no [[bin]] section needed.

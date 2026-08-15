@@ -17,9 +17,11 @@ gets compiled straight into the binary.
 
 The whole server is one Rust binary. Deploying it is "copy the file
 somewhere, set a few environment variables, run it." There's no config
-file, no CLI, no dotenv. Configuration is entirely `WAYPOINTD_*` env vars,
+file, no dotenv. Configuration is entirely `WAYPOINTD_*` env vars,
 and that's a feature, not an oversight: the process is meant to be launched
-by something that already knows how to set environment variables.
+by something that already knows how to set environment variables. The only
+command-line flags are `-?`/`--help`, `-v`/`--version`, and
+`-c`/`--config` — informational only, they print and exit.
 
 ## The server at a glance
 
@@ -121,8 +123,9 @@ knowing before you rely on them:
 ## Configuration
 
 Every knob is a `WAYPOINTD_*` environment variable. There is no config
-file, no CLI flags, no dotenv. Read at startup, so a change means a
-restart. Here is every variable the program reads.
+file, no dotenv; the only CLI flags are the informational
+`--help`/`--version`/`--config` (they print and exit). Read at startup, so
+a change means a restart. Here is every variable the program reads.
 
 ### Server
 

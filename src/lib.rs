@@ -21,7 +21,9 @@
 //!   pretty/JSON, per-request correlation ids)
 //!
 //! No layer below `core` knows the HTTP layer exists, and `http` is the
-//! only front door — there is no CLI to keep in sync.
+//! only front door — the binary's only other surface is three informational
+//! flags (`--help`/`--version`/`--config`, parsed in `main.rs`) that print
+//! and exit without configuring anything.
 //!
 //! # Dependency rules
 //!
