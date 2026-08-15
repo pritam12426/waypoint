@@ -2,7 +2,6 @@ import * as SeparatorPrimitive from "@radix-ui/react-separator";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Thin divider between sections. decorative=true keeps it out of the a11y tree.
 export function Separator({
 	className,
 	orientation = "horizontal",

@@ -3,9 +3,6 @@ import type * as React from "react";
 import { buttonVariants } from "#/components/ui/button";
 import { cn } from "#/lib/utils";
 
-// Modal for destructive confirmations: focus is trapped in the dialog so the
-// cancel/confirm buttons can't be skipped by accident. Action/Cancel reuse the
-// Button variants (destructive / outline).
 export const AlertDialog = AlertDialogPrimitive.Root;
 export const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
 

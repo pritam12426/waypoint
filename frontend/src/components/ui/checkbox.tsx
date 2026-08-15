@@ -3,8 +3,6 @@ import { Check } from "lucide-react";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Radix checkbox styled to match the field primitives; shows a check when
-// data-[state=checked] (driven by Radix, not local state).
 export function Checkbox({
 	className,
 	...props

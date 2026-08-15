@@ -1,8 +1,6 @@
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Card layout primitives (container/header/title/content/footer) for paneled
-// sections like the bookmark detail and settings pages.
 export function Card({ className, ...props }: React.ComponentPropsWithoutRef<"div">) {
 	return (
 		<div

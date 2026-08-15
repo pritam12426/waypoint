@@ -3,8 +3,6 @@ import { Check } from "lucide-react";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Popover action menu (row "more" menu). Root/Trigger/Group are passthroughs;
-// content is portaled so it escapes overflow-clipped ancestors.
 export const DropdownMenu = DropdownMenuPrimitive.Root;
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 export const DropdownMenuGroup = DropdownMenuPrimitive.Group;

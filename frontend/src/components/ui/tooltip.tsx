@@ -2,7 +2,6 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Hover/focus tooltip primitives. Provider must wrap the tree that uses them.
 export const TooltipProvider = TooltipPrimitive.Provider;
 export const Tooltip = TooltipPrimitive.Root;
 export const TooltipTrigger = TooltipPrimitive.Trigger;

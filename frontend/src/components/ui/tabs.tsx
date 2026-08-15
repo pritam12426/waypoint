@@ -2,8 +2,6 @@ import * as TabsPrimitive from "@radix-ui/react-tabs";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Radix tab primitives, styled. Active tab is tracked by Radix via
-// data-[state=active] on the trigger.
 export const Tabs = TabsPrimitive.Root;
 
 export function TabsList({

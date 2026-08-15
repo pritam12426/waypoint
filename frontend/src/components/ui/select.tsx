@@ -3,8 +3,6 @@ import { Check, ChevronDown } from "lucide-react";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Native-looking select dropdown built on Radix; popper position keeps it from
-// clipping inside small containers.
 export const Select = SelectPrimitive.Root;
 export const SelectValue = SelectPrimitive.Value;
 export const SelectGroup = SelectPrimitive.Group;

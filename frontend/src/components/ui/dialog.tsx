@@ -3,8 +3,6 @@ import { X } from "lucide-react";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Modal dialog primitives. Content renders in a portal with a dimmed overlay
-// and is centered; Esc and overlay-click close via Radix.
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
 export const DialogClose = DialogPrimitive.Close;

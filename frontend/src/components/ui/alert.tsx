@@ -2,8 +2,6 @@ import { type VariantProps, cva } from "class-variance-authority";
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Inline notice banner (info/error) with a11y role=alert so screen readers
-// announce it. Used for form errors and fetch failures.
 const alertVariants = cva(
 	"relative w-full rounded-lg border border-border px-4 py-3 text-sm [&>svg]:size-4",
 	{
