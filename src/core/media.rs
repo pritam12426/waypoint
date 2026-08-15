@@ -20,7 +20,7 @@
 //!
 //! The offline table is synchronous and string-only: no network I/O, no
 //! per-site error plumbing. A rule either produces a URL or returns `None`
-//! and the resolution falls through to the generic `favicon.ico` fallback.
+//! and the resolution falls through to the generic favicon fallback.
 //! The network fetchers are best-effort `Option`s run before the generic
 //! scrape (`<link rel=icon>` / `og:image`) in `core::fetch`, target-scoped
 //! by `MediaTarget`.
@@ -33,7 +33,7 @@
 //! matching a registered site fetcher (YouTube today) those two resolve the
 //! real icon — a video's channel avatar, a channel's icon, the CDN
 //! thumbnail — through the cache-first network pipeline; every other site
-//! resolves offline (rule table, then the generic `favicon.ico` fallback).
+//! resolves offline (rule table, then the generic favicon fallback).
 //! The frontend renders the thumbnail (`.card-thumb`) and the favicon when
 //! present.
 //!
@@ -54,7 +54,7 @@ use crate::model::{
 /// the first matching rule of *that target* wins, then fallbacks apply.
 ///
 /// The split matters because the two have different fallback semantics:
-/// every site gets *some* favicon (a rule, else `/favicon.ico`), but only
+/// every site gets *some* favicon (a rule, else the generic fallback), but only
 /// sites with an actual thumbnail rule get a thumbnail at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaTarget {
@@ -174,43 +174,31 @@ fn first_match(url: &str, target: MediaTarget) -> Option<String> {
 	None
 }
 
-/// Generic last-resort favicon for any site: `{scheme}://{host}/favicon.ico`.
-/// Only reached when no favicon rule matched.
+/// Generic last-resort favicon for any site: Google's favicon service
+/// (`https://www.google.com/s2/favicons?sz=256&domain=<host>`), which resolves a
+/// real favicon by domain with no probing of the site itself. Only reached
+/// when no favicon rule matched.
 ///
-/// Falls back to `https` when the URL had no explicit scheme, so even a
-/// scheme-less URL gets a sensible favicon. Unlike `scheme_and_host`, the
-/// authority keeps its `:port` — a `127.0.0.1:8080` dev server's generic
-/// favicon must point back at the same port, not drop it.
+/// The service takes a bare domain, so the scheme, `:port`, userinfo and
+/// path are all stripped via [`crate::shared::host_of`] — a `127.0.0.1`
+/// dev server's generic favicon is a Google miss rather than a local fetch.
 ///
 /// `pub(crate)` so `core::fetch` could use it as the last-resort for a
 /// page with no `<link rel=icon>`.
 pub(crate) fn fallback_favicon(url: &str) -> Option<String> {
-	let (scheme, rest) = match url.split_once("://") {
-		Some((s, r)) => (Some(s), r),
-		None => (None, url),
-	};
-	// Authority = the first `host[:port]` run after the scheme, userinfo
-	// (before the last `@`) stripped.
-	let authority_and_rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-	let authority = authority_and_rest
-		.rsplit('@')
-		.next()
-		.unwrap_or(authority_and_rest);
-	let authority = authority.trim();
-	if authority.is_empty() {
+	let Some(domain) = crate::shared::extract_domain(url) else {
 		crate::log_warn!(
 			"cannot derive a default favicon for {url:?}: the URL has no recognizable host"
 		);
 		return None;
-	}
+	};
 	Some(format!(
-		"{}://{authority}/favicon.ico",
-		scheme.unwrap_or("https")
+		"https://www.google.com/s2/favicons?sz=256&domain={domain}"
 	))
 }
 
 /// Resolves a favicon URL: a rule may override it (a channel-icon extractor,
-/// a known CDN path, ...), otherwise the domain's `/favicon.ico` is used.
+/// a known CDN path, ...), otherwise the generic domain fallback is used.
 pub fn favicon(url: &str) -> Option<String> {
 	crate::log_trace!("resolving favicon for {url:?}");
 	let resolved = first_match(url, MediaTarget::Favicon).or_else(|| fallback_favicon(url));
@@ -218,10 +206,10 @@ pub fn favicon(url: &str) -> Option<String> {
 	resolved
 }
 
-/// Resolves *only* the generic default favicon: `{scheme}://{host}/favicon.ico`,
-/// never a site-specific/custom rule. This is what `--no-custom-favicon`
-/// stores — a bookmark that must never pick up a custom channel icon or
-/// vendor path, just the plain domain favicon.
+/// Resolves *only* the generic default favicon (Google's `s2/favicons`
+/// service), never a site-specific/custom rule. This is what
+/// `--no-custom-favicon` stores — a bookmark that must never pick up a
+/// custom channel icon or vendor path, just the plain domain favicon.
 pub fn default_favicon(url: &str) -> Option<String> {
 	crate::log_trace!(
 		"resolving *generic* favicon for {url:?} (--no-custom-favicon path, rules skipped)"
@@ -245,7 +233,7 @@ pub fn thumbnail(url: &str) -> Option<String> {
 /// target) — for those sites the real icon is fetched once and reused from
 /// the media cache for 90 days, so a YouTube channel/video bookmark's
 /// `favicon` column holds its channel avatar instead of the generic
-/// `youtube.com/favicon.ico`. Every other URL resolves offline through the
+/// `youtube.com` favicon. Every other URL resolves offline through the
 /// rule table ([`favicon`]) — no network, no cache.
 ///
 /// General by design: registering a new site fetcher (one module + one
@@ -468,7 +456,7 @@ fn reject_token_collision(
 ///   2. an explicit payload value (the HTTP body, an import) still wins
 ///      over the derivation;
 ///   3. the empty string is the "no custom media" sentinel: favicon falls
-///      back to the *generic* domain `favicon.ico` (skipping site-specific
+///      back to the *generic* domain favicon (skipping site-specific
 ///      rules), thumbnail stays `None`;
 ///   4. otherwise auto-derived (cache-first for site-fetcher URLs).
 pub fn resolve_new(new: &NewBookmark) -> Result<ResolvedMedia, String> {
@@ -535,7 +523,7 @@ pub fn resolve_new(new: &NewBookmark) -> Result<ResolvedMedia, String> {
 ///   2. an explicit value in this update request always wins;
 ///   3. the empty string is the "no custom media" sentinel
 ///      (`--no-custom-favicon` / `--no-thumbnail`): it *resets* favicon
-///      to the generic domain `favicon.ico` (of the current or new URL)
+///      to the generic domain favicon (of the current or new URL)
 ///      and clears the thumbnail, regardless of URL change;
 ///   4. `refresh` (--refresh) re-fetches both from the (current or new)
 ///      URL, bypassing the fetched-media cache;
@@ -700,7 +688,7 @@ mod tests {
 		let url = "https://www.youtube.com/@SomeChannel";
 		assert_eq!(
 			favicon(url).as_deref(),
-			Some("https://www.youtube.com/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=www.youtube.com")
 		);
 		// Channel pages have no thumbnail rule.
 		assert_eq!(thumbnail(url), None);
@@ -713,19 +701,19 @@ mod tests {
 		let url = "https://example.org/some/path?q=1";
 		assert_eq!(
 			favicon(url).as_deref(),
-			Some("https://example.org/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=example.org")
 		);
 		assert_eq!(thumbnail(url), None);
 	}
 
-	// Scheme-less URLs (as pasted by a user) must still resolve; the
-	// fallback picks `https` for them.
+	// Scheme-less URLs (as pasted by a user) must still resolve to the
+	// generic Google favicon for the bare domain.
 	#[test]
 	fn scheme_less_url_still_matches() {
 		let url = "example.org/watch?v=x";
 		assert_eq!(
 			favicon(url).as_deref(),
-			Some("https://example.org/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=example.org")
 		);
 	}
 
@@ -737,16 +725,16 @@ mod tests {
 		let url = "https://www.youtube.com/@SomeChannel";
 		assert_eq!(
 			default_favicon(url).as_deref(),
-			Some("https://www.youtube.com/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=www.youtube.com")
 		);
 		assert_eq!(
 			favicon(url).as_deref(),
-			Some("https://www.youtube.com/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=www.youtube.com")
 		);
 		let scheme_less = "example.org/path";
 		assert_eq!(
 			default_favicon(scheme_less).as_deref(),
-			Some("https://example.org/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=example.org")
 		);
 	}
 
@@ -759,7 +747,7 @@ mod tests {
 		assert_eq!(thumbnail(url), None);
 		assert_eq!(
 			favicon(url).as_deref(),
-			Some("https://evil.example/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=evil.example")
 		);
 	}
 
@@ -790,7 +778,7 @@ mod tests {
 		let url = "http://127.0.0.1:1/";
 		assert_eq!(
 			fetch_favicon(url).as_deref(),
-			Some("http://127.0.0.1:1/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=127.0.0.1")
 		);
 		// And the scraped thumbnail stays None — no site fetcher or offline
 		// rule matches 127.0.0.1, and the generic scrape fails.
@@ -825,7 +813,7 @@ mod tests {
 		// refused) and degrades to the domain fallback...
 		assert_eq!(
 			fetch_favicon_fresh(url).as_deref(),
-			Some("http://127.0.0.1:1/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=127.0.0.1")
 		);
 		// ...but the offline fallback is *not* cached, so the earlier
 		// successful value is still served afterwards.
@@ -844,7 +832,7 @@ mod tests {
 		let url = "https://example.org/some/path?q=1";
 		assert_eq!(
 			resolve_favicon(url).as_deref(),
-			Some("https://example.org/favicon.ico")
+			Some("https://www.google.com/s2/favicons?sz=256&domain=example.org")
 		);
 		assert_eq!(resolve_thumbnail(url), None);
 	}

@@ -130,7 +130,7 @@ pub struct NewBookmark {
 	pub tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
 	pub note: Option<String>,
-	/// Favicon URL, or `""` to force the generic domain `favicon.ico`
+	/// Favicon URL, or `""` to force the generic domain favicon
 	/// (skipping site-specific/custom favicon rules). `None` auto-resolves.
 	pub favicon: Option<String>,
 	/// Thumbnail URL, or `""` to explicitly store none. `None` auto-resolves.
@@ -173,7 +173,7 @@ pub struct UpdateBookmark {
 	pub remove_tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
 	pub note: Option<String>,
-	/// Favicon URL to set, `""` to reset to the generic domain `favicon.ico`
+	/// Favicon URL to set, `""` to reset to the generic domain favicon
 	/// (skipping site-specific rules), or `None` to leave unchanged.
 	pub favicon: Option<String>,
 	/// Thumbnail URL to set, `""` to clear, or `None` to leave unchanged.

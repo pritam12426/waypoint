@@ -334,7 +334,7 @@ pub fn video_thumbnail(url: &str) -> Option<String> {
 /// favicon resolution on to the generic domain fallback.
 ///
 /// The channel *avatar* (fetch mode) is handled by `channel_avatar` above;
-/// the offline `Auto` mode keeps the generic `youtube.com/favicon.ico`
+/// the offline `Auto` mode keeps the generic `youtube.com` domain favicon
 /// since deriving the avatar needs a live page fetch.
 fn channel_icon(url: &str) -> Option<String> {
 	crate::log_trace!(
@@ -347,7 +347,7 @@ fn channel_icon(url: &str) -> Option<String> {
 ///
 /// * `/watch?v=...`      → video thumbnail
 /// * `/shorts/{id}`      → video thumbnail
-/// * `/@channel`         → favicon (offline: falls through to youtube.com/favicon.ico)
+/// * `/@channel`         → favicon (offline: falls through to the generic youtube.com favicon)
 ///
 /// Note the two thumbnail rules share `host_suffix: "youtube.com"` — they
 /// differ only by `path_prefix`, and the engine picks the *first* matching

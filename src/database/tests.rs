@@ -237,8 +237,8 @@ fn plain_bookmark(url: &str) -> NewBookmark {
 }
 
 /// A new bookmark is never stored with a missing favicon: the media engine
-/// derives it from the URL (domain `/favicon.ico` fallback), and sites with
-/// a thumbnail rule (YouTube) get a thumbnail too.
+/// derives it from the URL (Google's generic domain favicon fallback), and
+/// sites with a thumbnail rule (YouTube) get a thumbnail too.
 ///
 /// The YouTube leg is *cache-seeded*: the default resolution is cache-first
 /// (the favicon column holds the channel avatar), so the test pre-populates
@@ -255,7 +255,7 @@ fn insert_populates_favicon_and_thumbnail_from_url() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://example.com/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=example.com")
 	);
 	assert_eq!(b.thumbnail, None);
 
@@ -336,7 +336,7 @@ fn url_change_refreshes_media() {
 	let id = bm_db::insert(&conn, &plain_bookmark("https://example.com/one")).unwrap();
 	assert_eq!(
 		bm_db::get(&conn, id).unwrap().unwrap().favicon.as_deref(),
-		Some("https://example.com/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=example.com")
 	);
 
 	// The default resolution is cache-first for YouTube, so seed the media
@@ -388,7 +388,7 @@ fn url_change_refreshes_media() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://other.example/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=other.example")
 	);
 	assert_eq!(b.thumbnail, None);
 
@@ -533,7 +533,7 @@ fn refresh_bypasses_the_media_cache() {
 	.unwrap();
 	assert_eq!(
 		bm_db::get(&conn, id).unwrap().unwrap().favicon.as_deref(),
-		Some("http://127.0.0.1:1/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=127.0.0.1")
 	);
 }
 
@@ -569,7 +569,7 @@ fn insert_sentinel_forces_generic_media() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://www.youtube.com/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=www.youtube.com")
 	);
 	assert_eq!(b.thumbnail, None);
 }
@@ -620,7 +620,7 @@ fn update_sentinel_resets_media() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://example.com/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=example.com")
 	);
 	assert_eq!(b.thumbnail, None);
 
@@ -638,7 +638,7 @@ fn update_sentinel_resets_media() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://other.example/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=other.example")
 	);
 	assert_eq!(b.thumbnail, None);
 }
@@ -755,7 +755,7 @@ fn update_mode_default_replaces_custom_favicon() {
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
 	assert_eq!(
 		b.favicon.as_deref(),
-		Some("https://example.com/favicon.ico")
+		Some("https://www.google.com/s2/favicons?sz=256&domain=example.com")
 	);
 }
 
@@ -778,7 +778,10 @@ fn insert_fetch_mode_degrades_to_auto_on_failure() {
 	)
 	.unwrap();
 	let b = bm_db::get(&conn, id).unwrap().unwrap();
-	assert_eq!(b.favicon.as_deref(), Some("http://127.0.0.1:1/favicon.ico"));
+	assert_eq!(
+		b.favicon.as_deref(),
+		Some("https://www.google.com/s2/favicons?sz=256&domain=127.0.0.1")
+	);
 	assert_eq!(b.thumbnail, None);
 }
 
