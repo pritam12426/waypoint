@@ -10,8 +10,6 @@ export interface EmptyStateProps {
 	className?: string;
 }
 
-// Dashed placeholder shown when a list has no rows (and no active filter),
-// with optional icon, copy, and a call-to-action button.
 export function EmptyState({
 	icon: Icon,
 	title,

@@ -2,8 +2,6 @@ import { AlertTriangle } from "lucide-react";
 import type { FallbackProps } from "react-error-boundary";
 import { Button } from "#/components/ui/button";
 
-// React-Error-Boundary fallback for route crashes: shows the error message and
-// a "Try again" button wired to resetErrorBoundary.
 export function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
 	const message = error instanceof Error ? error.message : "Something went wrong.";
 	return (

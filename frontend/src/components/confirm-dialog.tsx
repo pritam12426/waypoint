@@ -30,8 +30,6 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
 	const [pending, setPending] = useState(false);
 
-	// Await the mutation so the dialog stays open (buttons disabled) until the
-	// request settles; a non-awaiting onConfirm would close before the toast lands.
 	async function handleConfirm() {
 		setPending(true);
 		try {

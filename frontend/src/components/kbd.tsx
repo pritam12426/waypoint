@@ -1,7 +1,6 @@
 import type * as React from "react";
 import { cn } from "#/lib/utils";
 
-// Styled keyboard-key label for shortcut hints (e.g. "⌘ K").
 export function Kbd({ className, ...props }: React.ComponentPropsWithoutRef<"kbd">) {
 	return (
 		<kbd
