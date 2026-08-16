@@ -22,10 +22,14 @@ use crate::{
 	database::{stats as st_db, tags as tag_db, visits as vis_db},
 	http::{AppState, error::AppError},
 	model::{
-		DomainCount, DomainVisitStats, HygieneStats, MonthlyActivity, NeverVisitedBookmark,
-		OrphanTag, StatsOverview, TagCount,
+		ActivityGranularity, ActivityPoint, DomainCount, DomainVisitStats, HygieneStats,
+		InactiveBookmark, NeverVisitedBookmark, StatsOverview, TagCount,
 	},
 };
+
+/// A bookmark qualifies as "inactive" once it's gone this long without a
+/// visit and without an edit.
+const INACTIVE_WINDOW_DAYS: i64 = 180;
 
 /// Pagination shared by the paged stats sub-resources. `limit` defaults
 /// differ per endpoint (see each handler); `offset` always defaults to 0.
@@ -35,6 +39,18 @@ pub struct StatsQuery {
 	limit: Option<i64>,
 	/// Number of results to skip.
 	offset: Option<i64>,
+}
+
+/// Query for the activity timeline: pagination plus the aggregation window.
+#[derive(Deserialize, IntoParams)]
+pub struct ActivityQuery {
+	/// Maximum number of periods.
+	limit: Option<i64>,
+	/// Number of periods to skip.
+	offset: Option<i64>,
+	/// Aggregation window: `day`, `month` (default), or `year`.
+	#[serde(default)]
+	granularity: ActivityGranularity,
 }
 
 /// Top domains by bookmark count.
@@ -180,15 +196,16 @@ pub async fn stats_never_visited(
 	.await
 }
 
-/// Tags that are applied to only one bookmark.
+/// Bookmarks with no recent engagement — never visited (or not in a long
+/// time) and not modified for `INACTIVE_WINDOW_DAYS`.
 #[utoipa::path(
 	get,
-	path = "/api/stats/orphan-tags",
+	path = "/api/stats/inactive",
 	tag = "stats",
 	params(StatsQuery),
-	responses((status = 200, description = "Orphan tags (used on only 1 bookmark)", body = [OrphanTag])),
+	responses((status = 200, description = "Inactive bookmarks", body = [InactiveBookmark])),
 )]
-pub async fn stats_orphan_tags(
+pub async fn stats_inactive(
 	State(state): State<AppState>,
 	ConnectInfo(addr): ConnectInfo<SocketAddr>,
 	Query(q): Query<StatsQuery>,
@@ -196,15 +213,17 @@ pub async fn stats_orphan_tags(
 ) -> Result<Response, AppError> {
 	let limit = validate_stats_limit(q.limit, 50)?;
 	let offset = validate_offset(q.offset)?;
-	crate::log_debug!("{addr} GET /api/stats/orphan-tags?limit={limit}&offset={offset}");
+	crate::log_debug!("{addr} GET /api/stats/inactive?limit={limit}&offset={offset}");
 	let if_none_match = headers
 		.get(header::IF_NONE_MATCH)
 		.and_then(|v| v.to_str().ok());
 	cached_json(
 		&state,
-		stats_key("orphan-tags", limit, offset),
+		stats_key("inactive", limit, offset),
 		if_none_match,
-		move |conn| tag_db::orphan_tags(conn, limit as usize, offset as usize),
+		move |conn| {
+			st_db::inactive(conn, INACTIVE_WINDOW_DAYS, limit as usize, offset as usize)
+		},
 	)
 	.await
 }
@@ -228,31 +247,42 @@ pub async fn stats_hygiene(
 	cached_json(&state, "hygiene".to_string(), if_none_match, st_db::hygiene).await
 }
 
-/// Bookmarks added per month over the last 12 months.
+/// Bookmarks added per day/month/year, newest first.
 #[utoipa::path(
 	get,
 	path = "/api/stats/activity",
 	tag = "stats",
-	params(StatsQuery),
-	responses((status = 200, description = "Monthly activity trend", body = [MonthlyActivity])),
+	params(ActivityQuery),
+	responses((status = 200, description = "Activity trend", body = [ActivityPoint])),
 )]
 pub async fn stats_activity(
 	State(state): State<AppState>,
 	ConnectInfo(addr): ConnectInfo<SocketAddr>,
-	Query(q): Query<StatsQuery>,
+	Query(q): Query<ActivityQuery>,
 	headers: HeaderMap,
 ) -> Result<Response, AppError> {
-	let limit = validate_stats_limit(q.limit, 12)?;
+	let default_limit = match q.granularity {
+		ActivityGranularity::Day => 31,
+		ActivityGranularity::Month => 12,
+		ActivityGranularity::Year => 10,
+	};
+	let limit = validate_stats_limit(q.limit, default_limit)?;
 	let offset = validate_offset(q.offset)?;
-	crate::log_debug!("{addr} GET /api/stats/activity?limit={limit}&offset={offset}");
+	crate::log_debug!(
+		"{addr} GET /api/stats/activity?granularity={}&limit={limit}&offset={offset}",
+		q.granularity
+	);
 	let if_none_match = headers
 		.get(header::IF_NONE_MATCH)
 		.and_then(|v| v.to_str().ok());
+	let granularity = q.granularity;
 	cached_json(
 		&state,
-		stats_key("activity", limit, offset),
+		format!("activity-{granularity}-{limit}-{offset}"),
 		if_none_match,
-		move |conn| st_db::monthly_activity(conn, limit as usize, offset as usize),
+		move |conn| {
+			st_db::activity(conn, granularity, limit as usize, offset as usize)
+		},
 	)
 	.await
 }

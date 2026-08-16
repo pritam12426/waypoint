@@ -391,6 +391,9 @@ pub struct BookmarkVisitStats {
 	pub visit_count: i64,
 	pub last_visited_at: Option<String>,
 	pub created_at: String,
+	/// Stored favicon URL for the bookmark (absent/empty means "no custom
+	/// favicon", so the client falls back to its own domain favicon).
+	pub favicon: Option<String>,
 }
 
 /// The aggregated `GET /api/stats` / `stats` overview payload.
@@ -425,16 +428,20 @@ pub struct NeverVisitedBookmark {
 	pub url: String,
 	pub domain: Option<String>,
 	pub created_at: String,
+	pub favicon: Option<String>,
 }
 
-/// A tag attached to exactly one active bookmark — a candidate for cleanup.
-/// `bookmark_id`/`bookmark_title` point at that one owner.
+/// A bookmark with no recent engagement — never visited (or not in a long
+/// time) and not modified for a while — a candidate for pruning.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct OrphanTag {
-	pub name: String,
-	pub bookmark_id: i64,
-	pub bookmark_title: String,
+pub struct InactiveBookmark {
+	pub id: i64,
+	pub title: String,
+	pub url: String,
 	pub domain: Option<String>,
+	pub favicon: Option<String>,
+	pub last_visited_at: Option<String>,
+	pub updated_at: String,
 }
 
 /// Hygiene counts over active bookmarks: how many are missing tags, notes,
@@ -447,12 +454,33 @@ pub struct HygieneStats {
 	pub missing_description: i64,
 }
 
-/// Bookmarks added in a given month (`month` is `"YYYY-MM"`), for the
-/// activity timeline.
+/// Bookmarks added in a given period (`period` is `"YYYY-MM-DD"`,
+/// `"YYYY-MM"`, or `"YYYY"` depending on the granularity), for the activity
+/// timeline.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct MonthlyActivity {
-	pub month: String,
+pub struct ActivityPoint {
+	pub period: String,
 	pub count: i64,
+}
+
+/// Aggregation window for the activity timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivityGranularity {
+	#[default]
+	Month,
+	Day,
+	Year,
+}
+
+impl std::fmt::Display for ActivityGranularity {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			ActivityGranularity::Day => "day",
+			ActivityGranularity::Month => "month",
+			ActivityGranularity::Year => "year",
+		})
+	}
 }
 
 /// The outcome of a criteria-based bulk remove: the bookmarks that matched
@@ -528,6 +556,8 @@ pub struct BookmarkFilter {
 	pub last_visited_before: Option<String>,
 	pub trashed_after: Option<String>,
 	pub trashed_before: Option<String>,
+	/// Only bookmarks that have never been visited (`last_visited_at IS NULL`).
+	pub never_visited: bool,
 	pub limit: Option<i64>,
 	pub offset: Option<i64>,
 	/// Keyset pagination bound: the `(created_at, id)` of the last row of the

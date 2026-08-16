@@ -524,6 +524,7 @@ pub fn app(state: AppState) -> Router {
 			axum::routing::put(handlers::rename_tag).delete(handlers::delete_tag),
 		)
 		.route("/search", get(handlers::search_bookmarks))
+		.route("/bookmarks/random", get(handlers::random_bookmarks))
 		.route("/import", post(handlers::import_bookmarks))
 		.route("/export", get(handlers::export_bookmarks))
 		.route("/check", post(handlers::start_check))
@@ -533,7 +534,7 @@ pub fn app(state: AppState) -> Router {
 		.route("/stats/tags", get(handlers::stats_tags))
 		.route("/stats/top-visited", get(handlers::stats_top_visited))
 		.route("/stats/never-visited", get(handlers::stats_never_visited))
-		.route("/stats/orphan-tags", get(handlers::stats_orphan_tags))
+		.route("/stats/inactive", get(handlers::stats_inactive))
 		.route("/stats/hygiene", get(handlers::stats_hygiene))
 		.route("/stats/activity", get(handlers::stats_activity))
 		.route("/admin/backup", post(handlers::admin_backup))

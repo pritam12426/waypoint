@@ -96,7 +96,7 @@ pub fn top_visited_domains(
 /// overview. Ties break by id (older bookmark wins) for stability.
 pub fn most_visited(conn: &Connection, limit: usize) -> Result<Vec<BookmarkVisitStats>> {
 	let mut stmt = conn.prepare(
-		"SELECT id, title, url, domain, visit_count, last_visited_at, created_at
+		"SELECT id, title, url, domain, visit_count, last_visited_at, created_at, favicon
          FROM bookmarks
          WHERE trashed_at IS NULL
          ORDER BY visit_count DESC, id ASC
@@ -111,6 +111,7 @@ pub fn most_visited(conn: &Connection, limit: usize) -> Result<Vec<BookmarkVisit
 			visit_count: row.get(4)?,
 			last_visited_at: row.get(5)?,
 			created_at: row.get(6)?,
+			favicon: row.get(7)?,
 		})
 	})?;
 	let stats = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -122,7 +123,7 @@ pub fn most_visited(conn: &Connection, limit: usize) -> Result<Vec<BookmarkVisit
 /// overview, sorted by `created_at` descending.
 pub fn recently_added(conn: &Connection, limit: usize) -> Result<Vec<BookmarkVisitStats>> {
 	let mut stmt = conn.prepare(
-		"SELECT id, title, url, domain, visit_count, last_visited_at, created_at
+		"SELECT id, title, url, domain, visit_count, last_visited_at, created_at, favicon
          FROM bookmarks
          WHERE trashed_at IS NULL
          ORDER BY created_at DESC
@@ -137,6 +138,7 @@ pub fn recently_added(conn: &Connection, limit: usize) -> Result<Vec<BookmarkVis
 			visit_count: row.get(4)?,
 			last_visited_at: row.get(5)?,
 			created_at: row.get(6)?,
+			favicon: row.get(7)?,
 		})
 	})?;
 	let stats = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -155,7 +157,7 @@ pub fn never_visited(
 	offset: usize,
 ) -> Result<Vec<NeverVisitedBookmark>> {
 	let mut stmt = conn.prepare(
-		"SELECT id, title, url, domain, created_at
+		"SELECT id, title, url, domain, created_at, favicon
          FROM bookmarks
          WHERE trashed_at IS NULL AND visit_count = 0
          ORDER BY created_at DESC
@@ -168,6 +170,7 @@ pub fn never_visited(
 			url: row.get(2)?,
 			domain: row.get(3)?,
 			created_at: row.get(4)?,
+			favicon: row.get(5)?,
 		})
 	})?;
 	let stats = rows.collect::<rusqlite::Result<Vec<_>>>()?;

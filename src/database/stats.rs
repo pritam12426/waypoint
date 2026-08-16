@@ -15,7 +15,9 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::model::{HygieneStats, MonthlyActivity, StatsOverview};
+use crate::model::{
+	ActivityGranularity, ActivityPoint, HygieneStats, InactiveBookmark, StatsOverview,
+};
 
 use super::categories;
 use super::tags;
@@ -113,33 +115,82 @@ pub fn hygiene(conn: &Connection) -> Result<HygieneStats> {
 	})
 }
 
-/// Bookmarks added per calendar month, newest first (defaults to the most
-/// recent 12 months).
+/// Bookmarks added per calendar period, newest first.
 ///
-/// Uses SQLite's `strftime('%Y-%m', ...)` so the grouping keys are already
-/// `"YYYY-MM"` strings — no timezone handling in Rust. Months with zero
-/// bookmarks produce no row (gaps in the timeline are simply absent).
-/// `limit`/`offset` page the timeline.
-pub fn monthly_activity(
+/// Uses SQLite's `strftime` with a granularity-specific format so the
+/// grouping keys are already strings (`"YYYY-MM-DD"` / `"YYYY-MM"` / `"YYYY"`)
+/// — no timezone handling in Rust. Periods with zero bookmarks produce no
+/// row (gaps in the timeline are simply absent). `limit`/`offset` page the
+/// timeline.
+pub fn activity(
 	conn: &Connection,
+	granularity: ActivityGranularity,
 	limit: usize,
 	offset: usize,
-) -> Result<Vec<MonthlyActivity>> {
+) -> Result<Vec<ActivityPoint>> {
+	let format = match granularity {
+		ActivityGranularity::Day => "%Y-%m-%d",
+		ActivityGranularity::Month => "%Y-%m",
+		ActivityGranularity::Year => "%Y",
+	};
 	let mut stmt = conn.prepare(
-		"SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as cnt
+		"SELECT strftime(?3, created_at) as period, COUNT(*) as cnt
          FROM bookmarks
          WHERE trashed_at IS NULL
-         GROUP BY month
-         ORDER BY month DESC
+         GROUP BY period
+         ORDER BY period DESC
          LIMIT ?1 OFFSET ?2",
 	)?;
-	let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
-		Ok(MonthlyActivity {
-			month: row.get(0)?,
+	let rows = stmt.query_map(params![limit as i64, offset as i64, format], |row| {
+		Ok(ActivityPoint {
+			period: row.get(0)?,
 			count: row.get(1)?,
 		})
 	})?;
-	let months = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-	crate::log_trace!("monthly activity -> {} months", months.len());
-	Ok(months)
+	let points = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!("{granularity} activity -> {} periods", points.len());
+	Ok(points)
+}
+
+/// Bookmarks with no recent engagement — never visited (or not within the
+/// window) and not modified in `window_days` — oldest first so the most
+/// stale candidates top the list. `limit`/`offset` page the list.
+///
+/// Timestamps are stored as `CURRENT_TIMESTAMP` ("YYYY-MM-DD HH:MM:SS",
+/// UTC), so the same format from `datetime('now', ...)` compares directly.
+/// `updated_at` only moves on real edits, not on visit tracking (see the
+/// migration trigger), so "not modified" is a genuine signal.
+pub fn inactive(
+	conn: &Connection,
+	window_days: i64,
+	limit: usize,
+	offset: usize,
+) -> Result<Vec<InactiveBookmark>> {
+	let mut stmt = conn.prepare(
+		"SELECT id, title, url, domain, favicon, last_visited_at, updated_at
+         FROM bookmarks
+         WHERE trashed_at IS NULL
+           AND updated_at < datetime('now', ?3)
+           AND (last_visited_at IS NULL OR last_visited_at < datetime('now', ?3))
+         ORDER BY updated_at ASC
+         LIMIT ?1 OFFSET ?2",
+	)?;
+	let window = format!("-{} days", window_days);
+	let rows = stmt.query_map(
+		params![limit as i64, offset as i64, window],
+		|row| {
+			Ok(InactiveBookmark {
+				id: row.get(0)?,
+				title: row.get(1)?,
+				url: row.get(2)?,
+				domain: row.get(3)?,
+				favicon: row.get(4)?,
+				last_visited_at: row.get(5)?,
+				updated_at: row.get(6)?,
+			})
+		},
+	)?;
+	let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	crate::log_trace!("inactive bookmarks -> {} rows", items.len());
+	Ok(items)
 }

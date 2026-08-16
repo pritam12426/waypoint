@@ -474,6 +474,9 @@ fn build_where(filter: &BookmarkFilter) -> (Vec<String>, Vec<Box<dyn rusqlite::T
 		conditions.push("(b.last_visited_at IS NULL OR b.last_visited_at <= ?)".into());
 		values.push(Box::new(bound.clone()));
 	}
+	if filter.never_visited {
+		conditions.push("b.last_visited_at IS NULL".into());
+	}
 	// `trashed_at` bounds only make sense with `trash: true`; they are what
 	// "empty the trash up to this date" maps onto.
 	if let Some(bound) = &filter.trashed_after {
@@ -649,6 +652,40 @@ pub fn list_keywords(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<B
 	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 	attach_tags(conn, bookmarks)
 }
+
+/// A random sample of bookmarks matching `filter`, in random order. Reuses
+/// `build_where`, so it matches exactly what `list`/`count` match.
+///
+/// `ORDER BY RANDOM()` is a full-table sort of the corpus — fine for a
+/// single-user bookmark DB at this size; if the corpus ever grows past
+/// ~100k rows, sample via the rowid counter and pick random ids instead
+/// (`SELECT id FROM bookmarks WHERE id >= (abs(random()) % (SELECT MAX(id) ...))`).
+pub fn random(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<Bookmark>> {
+	let mut sql = format!(
+		"SELECT {SELECT_BOOKMARK_FIELDS}
+         FROM bookmarks b LEFT JOIN categories c ON c.id = b.category_id"
+	);
+
+	let (conditions, values) = build_where(filter);
+	if !conditions.is_empty() {
+		sql.push_str(" WHERE ");
+		sql.push_str(&conditions.join(" AND "));
+	}
+
+	sql.push_str(" ORDER BY RANDOM()");
+
+	// Validated integer (never user-controlled), so splicing carries no
+	// injection risk; matches the other list functions' clamp.
+	let limit = filter.limit.unwrap_or(10).clamp(1, MAX_UNPAGINATED);
+	sql.push_str(&format!(" LIMIT {limit}"));
+
+	let mut stmt = conn.prepare(&sql)?;
+	let param_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+	let rows = stmt.query_map(param_refs.as_slice(), row_to_bookmark)?;
+
+	let bookmarks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+	attach_tags(conn, bookmarks)
+} 
 
 /// Applies a partial update to an active bookmark. Returns `Some` with the
 /// *pre-update* bookmark (the caller uses it for the change log and audit

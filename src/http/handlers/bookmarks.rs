@@ -20,7 +20,7 @@ use utoipa::IntoParams;
 
 use super::shared::{
 	X_NEXT_CURSOR, X_TOTAL_COUNT, parse_bound, validate_bounds, validate_id, validate_keyword,
-	validate_limit, validate_offset, validate_redirect_template, validate_url,
+	validate_limit, validate_offset, validate_redirect_template, validate_stats_limit, validate_url,
 };
 use crate::{
 	database::bookmarks as bm_db,
@@ -171,6 +171,7 @@ pub async fn list_bookmarks(
 		last_visited_before: visited_before,
 		trashed_after,
 		trashed_before,
+		never_visited: false,
 		limit: Some(limit),
 		// Cursor and offset are mutually exclusive; the cursor wins.
 		offset: before_cursor.as_ref().map_or(Some(offset), |_| None),
@@ -285,6 +286,105 @@ fn next_link(uri: &Uri, next_cursor: &str) -> Option<String> {
 	parts.push(format!("cursor={next_cursor}"));
 	let query = parts.join("&");
 	Some(format!("</api/bookmarks?{query}>; rel=\"next\""))
+}
+
+/// Query parameters for the random-pick endpoint.
+#[derive(Deserialize, IntoParams)]
+pub struct RandomQuery {
+	/// How many random bookmarks to pick (1–1000, default 10).
+	limit: Option<i64>,
+	/// Restrict the pool to one category name.
+	category: Option<String>,
+	/// Restrict the pool to one tag name.
+	tag: Option<String>,
+	/// Filter by starred state.
+	starred: Option<bool>,
+	/// `true` picks from archived bookmarks, `false` from active only;
+	/// omitted picks from both.
+	archived: Option<bool>,
+	/// Which pool to pick from: `all` (default), `never_visited` (only
+	/// bookmarks that have never been opened), or `unseen_90d` (not visited
+	/// in the last 90 days).
+	pool: Option<String>,
+}
+
+/// Pick bookmarks at random from the filtered pool. Each call rolls the
+/// dice fresh (`ORDER BY RANDOM()`), so the result is a fair sample of
+/// whatever the category/tag/archived/starred/pool filters select. The
+/// `x-total-count` header reports the size of the pool the sample was drawn
+/// from.
+#[utoipa::path(
+	get,
+	path = "/api/bookmarks/random",
+	tag = "bookmarks",
+	params(RandomQuery),
+	responses(
+		(
+			status = 200,
+			description = "Randomly picked bookmarks",
+			body = [Bookmark],
+			headers(("x-total-count" = i64, description = "Size of the pool the sample was drawn from")),
+		),
+		(status = 400, description = "Invalid query parameters", body = ApiErrorBody),
+	)
+)]
+pub async fn random_bookmarks(
+	State(state): State<AppState>,
+	ConnectInfo(addr): ConnectInfo<SocketAddr>,
+	Query(q): Query<RandomQuery>,
+) -> Result<Response, AppError> {
+	let limit = validate_stats_limit(q.limit, 10)?;
+	let (never_visited, last_visited_before) = match q.pool.as_deref() {
+		None | Some("all") => (false, None),
+		Some("never_visited") => (true, None),
+		Some("unseen_90d") => (
+			false,
+			Some(
+				(chrono::Utc::now() - chrono::Duration::days(90))
+					.format("%Y-%m-%d %H:%M:%S")
+					.to_string(),
+			),
+		),
+		Some(other) => {
+			return Err(AppError::invalid_limit(format!(
+				"unknown pool {other:?}; use \"all\", \"never_visited\", or \"unseen_90d\""
+			)));
+		}
+	};
+	let filter = BookmarkFilter {
+		category: q.category,
+		tag: q.tag,
+		starred: q.starred,
+		archived: q.archived,
+		never_visited,
+		last_visited_before,
+		limit: Some(limit),
+		..Default::default()
+	};
+	let db = state.db.clone();
+	let (bookmarks, pool_size) = tokio::task::spawn_blocking(move || {
+		let conn = db.reader();
+		let sample = bm_db::random(&conn, &filter)?;
+		// The pool count mirrors the sample's WHERE clause (same
+		// `build_where`), with pagination stripped.
+		let mut count_filter = filter.clone();
+		count_filter.limit = None;
+		let pool_size = bm_db::count(&conn, &count_filter)?;
+		Ok::<_, anyhow::Error>((sample, pool_size))
+	})
+	.await??;
+	crate::log_debug!(
+		"{addr} GET /api/bookmarks/random: picked {} of {pool_size} bookmark(s)",
+		bookmarks.len()
+	);
+	Ok((
+		[(
+			X_TOTAL_COUNT,
+			pool_size.to_string().parse::<header::HeaderValue>().unwrap(),
+		)],
+		Json(bookmarks),
+	)
+		.into_response())
 }
 
 /// Create a new bookmark.
@@ -743,6 +843,7 @@ pub async fn bulk_delete_bookmarks(
 			last_visited_before: visited_before,
 			trashed_after,
 			trashed_before,
+			never_visited: false,
 			limit: None,
 			offset: None,
 			before_cursor: None,
