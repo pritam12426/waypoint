@@ -99,16 +99,31 @@ pub async fn sign_in(
 		})
 		.into_response());
 	}
+	// Per-IP breaker: too many failed exchanges lock the address out for a
+	// cooldown (see `http::throttle`). Checked before the token is even
+	// touched, so a locked-out client can't burn any work.
+	if state.login_throttle.locked(addr.ip()) {
+		crate::log_warn!("auth: sign-in throttled from {addr}: too many failed attempts");
+		return Err(AppError::rate_limited(
+			"too many failed sign-in attempts from this address; try again later",
+		)
+		.already_logged());
+	}
 	// A failed sign-in gets its own warn line with the client address (the
 	// generic `AppError` line is suppressed via `already_logged`), so a
 	// brute-force or credential-stuffing attempt is easy to grep for.
 	let Some(scope) = auth::classify(&state, &req.token) else {
 		crate::log_warn!("auth: sign-in rejected from {addr}: invalid token");
+		let locked = state.login_throttle.record_failure(addr.ip());
+		if locked {
+			crate::log_warn!("auth: {addr} locked out after too many failed sign-in attempts");
+		}
 		return Err(AppError::unauthorized(
 			"that token is not recognized; check WAYPOINTD_SERVE_TOKEN",
 		)
 		.already_logged());
 	};
+	state.login_throttle.record_success(addr.ip());
 	crate::log_info!("auth: sign-in accepted from {addr} ({})", scope_desc(scope));
 	let cookie = session_cookie(&state, &req.token);
 	Ok((

@@ -44,6 +44,7 @@ fn test_state() -> (tempfile::TempDir, AppState) {
 		idempotency: Arc::new(waypointd::http::IdempotencyStore::new()),
 		concurrency: Arc::new(tokio::sync::Semaphore::new(64)),
 		request_timeout: Duration::from_secs(30),
+		login_throttle: Arc::new(waypointd::http::LoginThrottle::new()),
 	};
 	(dir, state)
 }

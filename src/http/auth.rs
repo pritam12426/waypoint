@@ -198,6 +198,7 @@ mod tests {
 			idempotency: Arc::new(IdempotencyStore::new()),
 			concurrency: Arc::new(tokio::sync::Semaphore::new(64)),
 			request_timeout: Duration::from_secs(30),
+			login_throttle: Arc::new(crate::http::LoginThrottle::new()),
 		}
 	}
 

@@ -42,11 +42,13 @@ pub mod handlers;
 mod idempotency;
 mod jobs;
 mod metrics;
+mod throttle;
 
 pub use cache::Cache;
 pub use idempotency::IdempotencyStore;
 pub use jobs::Jobs;
 pub use metrics::Metrics;
+pub use throttle::LoginThrottle;
 
 use crate::database;
 use anyhow::Result;
@@ -164,6 +166,7 @@ pub struct AppState {
 	pub idempotency: Arc<IdempotencyStore>,
 	pub concurrency: Arc<Semaphore>,
 	pub request_timeout: Duration,
+	pub login_throttle: Arc<LoginThrottle>,
 }
 
 impl AppState {
@@ -203,6 +206,7 @@ pub async fn run(settings: Settings) -> Result<()> {
 		idempotency: Arc::new(IdempotencyStore::new()),
 		concurrency: Arc::new(Semaphore::new(settings.max_concurrency)),
 		request_timeout: settings.request_timeout,
+		login_throttle: Arc::new(LoginThrottle::new()),
 	};
 
 	if state.api_token.is_some() {

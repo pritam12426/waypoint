@@ -49,6 +49,11 @@ shared-secret handshake, and the address-bar redirect routes
 (`/keywords/...`, `/open/{id}`) stay open regardless because a navigation
 can't send the header.
 
+Sign-in is throttled per client IP: five failed token exchanges within a
+15-minute window lock the address out for the next 15 minutes
+(`429 rate_limited`). It's a spray-brake for a leaked token, not a fortress —
+the breaker lives in process memory, so a restart clears it.
+
 ## Logging
 
 The human-readable format looks like this:

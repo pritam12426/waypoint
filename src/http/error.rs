@@ -52,6 +52,7 @@ pub enum ErrorCode {
 	Forbidden,
 	Busy,
 	Timeout,
+	RateLimited,
 	ReplayConflict,
 	Internal,
 }
@@ -75,6 +76,7 @@ impl ErrorCode {
 			ErrorCode::Forbidden => "forbidden",
 			ErrorCode::Busy => "busy",
 			ErrorCode::Timeout => "request_timeout",
+			ErrorCode::RateLimited => "rate_limited",
 			ErrorCode::ReplayConflict => "idempotency_conflict",
 			ErrorCode::Internal => "internal_error",
 		}
@@ -97,6 +99,7 @@ impl ErrorCode {
 			ErrorCode::ConflictUrl | ErrorCode::ConflictKeyword => StatusCode::CONFLICT,
 			ErrorCode::Busy => StatusCode::SERVICE_UNAVAILABLE,
 			ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
+			ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 			ErrorCode::ReplayConflict => StatusCode::CONFLICT,
 			ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
 		}
@@ -196,6 +199,10 @@ impl AppError {
 
 	pub fn timeout(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Timeout, message)
+	}
+
+	pub fn rate_limited(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::RateLimited, message)
 	}
 
 	pub fn replay_conflict(message: impl Into<String>) -> Self {
