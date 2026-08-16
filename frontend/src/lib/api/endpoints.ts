@@ -1,6 +1,7 @@
 import { apiRequest } from "./client";
 import type {
-	ActivityMonth,
+	ActivityGranularity,
+	ActivityPoint,
 	AuthStatus,
 	Bookmark,
 	BulkDeleteResult,
@@ -9,9 +10,9 @@ import type {
 	CheckJob,
 	DomainStat,
 	Hygiene,
+	InactiveBookmark,
 	NeverVisited,
 	NewBookmark,
-	OrphanTag,
 	StatsOverview,
 	Tag,
 	UpdateBookmark,
@@ -49,6 +50,16 @@ export interface BulkDeleteParams {
 	purge?: boolean;
 	dry_run?: boolean;
 }
+
+export type RandomParams = {
+	limit?: number;
+	category?: string;
+	tag?: string;
+	starred?: boolean;
+	archived?: boolean;
+	/** `all` (default), `never_visited`, or `unseen_90d`. */
+	pool?: "all" | "never_visited" | "unseen_90d";
+} & Record<string, string | number | boolean | null | undefined>;
 
 export const bookmarksApi = {
 	list: (params: BookmarkListParams = {}) =>
@@ -93,6 +104,8 @@ export const bookmarksApi = {
 		}),
 
 	emptyTrash: () => apiRequest<void>("/api/trash", { method: "DELETE" }),
+	random: (params: RandomParams = {}) =>
+		apiRequest<Bookmark[]>("/api/bookmarks/random", { params }),
 };
 
 export const categoriesApi = {
@@ -138,10 +151,11 @@ export const statsApi = {
 	topVisited: () => apiRequest<Bookmark[]>("/api/stats/top-visited"),
 	neverVisited: (limit?: number, offset?: number) =>
 		apiRequest<NeverVisited[]>("/api/stats/never-visited", { params: { limit, offset } }),
-	orphanTags: (limit?: number, offset?: number) =>
-		apiRequest<OrphanTag[]>("/api/stats/orphan-tags", { params: { limit, offset } }),
+	inactive: (limit?: number, offset?: number) =>
+		apiRequest<InactiveBookmark[]>("/api/stats/inactive", { params: { limit, offset } }),
 	hygiene: () => apiRequest<Hygiene>("/api/stats/hygiene"),
-	activity: () => apiRequest<ActivityMonth[]>("/api/stats/activity"),
+	activity: (granularity: ActivityGranularity, limit?: number) =>
+		apiRequest<ActivityPoint[]>("/api/stats/activity", { params: { granularity, limit } }),
 };
 
 export const adminApi = {

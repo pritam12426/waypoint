@@ -30,8 +30,7 @@ function TrashPage() {
 
 	return (
 		<div className="space-y-4">
-			<div className="flex items-center justify-between">
-				<h1 className="text-xl font-semibold">Trash</h1>
+			<div className="flex items-center justify-end">
 				{items.length > 0 && (
 					<Button variant="destructive" size="sm" onClick={() => setConfirmEmpty(true)}>
 						Empty trash

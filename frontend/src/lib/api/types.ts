@@ -101,12 +101,17 @@ export interface NeverVisited {
 	url: string;
 	domain: string;
 	created_at: string;
+	favicon: string | null;
 }
 
-export interface OrphanTag {
-	name: string;
-	bookmark_id: number;
-	bookmark_title: string;
+export interface InactiveBookmark {
+	id: number;
+	title: string;
+	url: string;
+	domain: string | null;
+	favicon: string | null;
+	last_visited_at: string | null;
+	updated_at: string;
 }
 
 export interface Hygiene {
@@ -116,10 +121,12 @@ export interface Hygiene {
 	missing_description: number;
 }
 
-export interface ActivityMonth {
-	month: string;
+export interface ActivityPoint {
+	period: string;
 	count: number;
 }
+
+export type ActivityGranularity = "day" | "month" | "year";
 
 export interface CheckJob {
 	id: string;

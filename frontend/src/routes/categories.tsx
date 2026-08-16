@@ -31,7 +31,6 @@ function CategoriesPage() {
 
 	return (
 		<div className="mx-auto max-w-xl space-y-4">
-			<h1 className="text-xl font-semibold">Categories</h1>
 			{isLoading && (
 				<div className="space-y-1">
 					{Array.from({ length: 4 }).map((_, i) => (
@@ -87,6 +86,7 @@ function CategoriesPage() {
 									<Button
 										size="icon"
 										variant="ghost"
+										className="hover:bg-destructive hover:text-destructive-foreground"
 										onClick={() => setDeleteTarget({ id: c.id, name: c.name })}
 										aria-label="Delete"
 									>

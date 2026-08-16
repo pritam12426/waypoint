@@ -8,7 +8,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { useState } from "react";
-import { Thumbnail } from "#/components/bookmark-media";
+import { Favicon, Thumbnail } from "#/components/bookmark-media";
 import { ConfirmDialog } from "#/components/confirm-dialog";
 import { Link } from "#/components/link";
 import { Badge } from "#/components/ui/badge";
@@ -70,7 +70,10 @@ function BookmarkDetailPage() {
 			)}
 
 			<div className="flex items-start justify-between gap-4">
-				<h1 className="text-2xl font-semibold">{bm.title || bm.url}</h1>
+				<div className="flex items-center gap-2.5">
+					<Favicon src={bm.favicon} domain={bm.domain} className="size-6" />
+					<h1 className="text-2xl font-semibold">{bm.title || bm.url}</h1>
+				</div>
 				<div className="flex shrink-0 gap-1">
 					<Button
 						variant="ghost"
@@ -80,7 +83,7 @@ function BookmarkDetailPage() {
 						}
 						aria-label="Star"
 					>
-						<Star className={bm.starred ? "fill-primary text-primary" : ""} />
+						<Star className={bm.starred ? "fill-amber-500 text-amber-500" : ""} />
 					</Button>
 					<Button
 						variant="ghost"
@@ -101,6 +104,7 @@ function BookmarkDetailPage() {
 						<Button
 							variant="ghost"
 							size="icon"
+							className="hover:bg-destructive hover:text-destructive-foreground"
 							onClick={() => setConfirmTrash(true)}
 							aria-label="Trash"
 						>

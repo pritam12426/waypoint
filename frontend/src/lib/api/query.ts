@@ -33,15 +33,19 @@ export const qk = {
 	tags: () => [...qk.all, "tags"] as const,
 	keywords: () => [...qk.all, "keywords"] as const,
 	search: (q: string, params: unknown) => [...qk.all, "search", q, params] as const,
+	random: {
+		pool: (params: unknown) => [...qk.all, "random", "pool", params] as const,
+	},
 	stats: {
 		overview: () => [...qk.all, "stats", "overview"] as const,
 		domains: (page: unknown) => [...qk.all, "stats", "domains", page] as const,
 		tags: (page: unknown) => [...qk.all, "stats", "tags", page] as const,
 		topVisited: () => [...qk.all, "stats", "top-visited"] as const,
 		neverVisited: (page: unknown) => [...qk.all, "stats", "never-visited", page] as const,
-		orphanTags: (page: unknown) => [...qk.all, "stats", "orphan-tags", page] as const,
+		inactive: (page: unknown) => [...qk.all, "stats", "inactive", page] as const,
 		hygiene: () => [...qk.all, "stats", "hygiene"] as const,
-		activity: () => [...qk.all, "stats", "activity"] as const,
+		activity: (granularity: unknown) =>
+			[...qk.all, "stats", "activity", granularity] as const,
 	},
 	auth: {
 		status: () => [...qk.all, "auth", "status"] as const,

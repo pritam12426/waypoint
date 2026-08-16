@@ -2,14 +2,15 @@ import { useNavigate } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import {
 	Archive,
-	Compass,
-	Home,
+	Dices,
 	Link2,
+	PieChart,
 	Plus,
 	Search,
 	Settings,
 	Star,
 	Tags,
+	TextCursorInput,
 	Trash2,
 } from "lucide-react";
 import { useState } from "react";
@@ -23,15 +24,17 @@ export interface CommandPaletteProps {
 }
 
 const NAV_ACTIONS = [
-	{ to: "/", label: "Go to Dashboard", icon: Home },
+	{ to: "/overview", label: "Go to Stats", icon: PieChart },
 	{ to: "/bookmarks", label: "Go to Bookmarks", icon: Link2 },
+	{ to: "/starred", label: "Go to Starred", icon: Star },
+	{ to: "/archived", label: "Go to Archived", icon: Archive },
+	{ to: "/random", label: "Go to Random", icon: Dices },
 	{ to: "/bookmarks/new", label: "New bookmark", icon: Plus },
 	{ to: "/search", label: "Go to Search", icon: Search },
 	{ to: "/trash", label: "Go to Trash", icon: Trash2 },
 	{ to: "/categories", label: "Go to Categories", icon: Archive },
 	{ to: "/tags", label: "Go to Tags", icon: Tags },
-	{ to: "/keywords", label: "Go to Keywords", icon: Compass },
-	{ to: "/stats", label: "Go to Stats", icon: Star },
+	{ to: "/keywords", label: "Go to Keywords", icon: TextCursorInput },
 	{ to: "/settings", label: "Go to Settings", icon: Settings },
 ] as const;
 

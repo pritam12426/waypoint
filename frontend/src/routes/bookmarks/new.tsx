@@ -13,7 +13,6 @@ function NewBookmarkPage() {
 
 	return (
 		<div className="mx-auto max-w-xl space-y-4">
-			<h1 className="text-xl font-semibold">New bookmark</h1>
 			<BookmarkForm
 				categories={categories}
 				pending={createBookmark.isPending}

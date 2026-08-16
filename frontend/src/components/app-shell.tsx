@@ -1,15 +1,17 @@
-import { useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
 	Archive,
-	Compass,
-	Home,
+	Dices,
 	Keyboard,
 	Link2,
 	Menu,
+	PieChart,
+	Plus,
 	Search,
 	Settings,
 	Star,
 	Tags,
+	TextCursorInput,
 	Trash2,
 } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -19,20 +21,29 @@ import { KeyboardHelp } from "#/components/keyboard-help";
 import { Link } from "#/components/link";
 import { ThemeToggle } from "#/components/theme-toggle";
 import { Button } from "#/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "#/components/ui/dialog";
 import { Input } from "#/components/ui/input";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "#/components/ui/tooltip";
 import { useListNav } from "#/lib/list-nav";
 import { cn } from "#/lib/utils";
+import { SettingsContent } from "#/routes/settings";
 
 const NAV_ITEMS = [
-	{ to: "/", label: "Dashboard", icon: Home },
 	{ to: "/bookmarks", label: "Bookmarks", icon: Link2 },
+	{ to: "/starred", label: "Starred", icon: Star },
+	{ to: "/archived", label: "Archived", icon: Archive },
+	{ to: "/random", label: "Random", icon: Dices },
+	{ to: "/overview", label: "Stats", icon: PieChart },
 	{ to: "/search", label: "Search", icon: Search },
 	{ to: "/trash", label: "Trash", icon: Trash2 },
-	{ to: "/categories", label: "Categories", icon: Archive },
+	{ to: "/categories", label: "Categories", icon: Archive, spacing: true },
 	{ to: "/tags", label: "Tags", icon: Tags },
-	{ to: "/keywords", label: "Keywords", icon: Compass },
-	{ to: "/stats", label: "Stats", icon: Star },
-	{ to: "/settings", label: "Settings", icon: Settings },
+	{ to: "/keywords", label: "Keywords", icon: TextCursorInput },
 ] as const;
 
 function isTypingTarget(target: EventTarget | null) {
@@ -43,11 +54,28 @@ function isTypingTarget(target: EventTarget | null) {
 	);
 }
 
+const HEADER_TITLES: Record<string, string> = {
+	"/bookmarks": "Bookmarks",
+	"/starred": "Starred",
+	"/archived": "Archived",
+	"/random": "Random",
+	"/overview": "Stats",
+	"/search": "Search",
+	"/trash": "Trash",
+	"/categories": "Categories",
+	"/tags": "Tags",
+	"/keywords": "Keywords",
+	"/settings": "Settings",
+	"/bookmarks/new": "New bookmark",
+};
+
 export function AppShell({ children }: { children: ReactNode }) {
 	const navigate = useNavigate();
+	const location = useLocation();
 	const [paletteOpen, setPaletteOpen] = useState(false);
 	const [helpOpen, setHelpOpen] = useState(false);
 	const [sidebarOpen, setSidebarOpen] = useState(false);
+	const [settingsOpen, setSettingsOpen] = useState(false);
 	const searchInputRef = useRef<HTMLInputElement>(null);
 
 	// Buffer for the "gg" two-key sequence.
@@ -143,28 +171,63 @@ export function AppShell({ children }: { children: ReactNode }) {
 		<div className="flex min-h-screen bg-background">
 			<aside
 				className={cn(
-					"fixed inset-y-0 left-0 z-40 w-60 shrink-0 border-r border-border bg-card transition-transform lg:static lg:translate-x-0",
+					"fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r border-border bg-card transition-transform lg:w-16 lg:translate-x-0",
 					sidebarOpen ? "translate-x-0" : "-translate-x-full",
 				)}
 			>
-				<div className="flex h-14 items-center gap-2 border-b border-border px-4">
-					<Link2 className="size-5 text-primary" />
-					<span className="font-semibold">waypointd</span>
+				<div className="flex h-14 items-center gap-2 border-b border-border px-4 lg:justify-center lg:px-0">
+					<TooltipProvider delayDuration={1000}>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									onClick={() => navigate({ to: "/bookmarks/new" })}
+									aria-label="New bookmark"
+									className="w-full bg-blue-600 text-white hover:bg-blue-700 lg:h-9 lg:w-9 lg:shrink-0 lg:justify-center lg:p-0"
+								>
+									<Plus className="size-4 shrink-0" />
+									<span className="lg:hidden">New bookmark</span>
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="right">New bookmark</TooltipContent>
+						</Tooltip>
+					</TooltipProvider>
 				</div>
-				<nav className="flex flex-col gap-0.5 p-2">
-					{NAV_ITEMS.map((item) => (
-						<Link
-							key={item.to}
-							to={item.to}
-							onClick={() => setSidebarOpen(false)}
-							className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground [&.active]:bg-accent [&.active]:text-accent-foreground"
-							activeOptions={{ exact: item.to === "/" }}
-						>
-							<item.icon className="size-4" />
-							{item.label}
-						</Link>
-					))}
+				<nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
+					<TooltipProvider delayDuration={1000}>
+						{NAV_ITEMS.map((item) => (
+							<Tooltip key={item.to}>
+								<TooltipTrigger asChild>
+									<Link
+										to={item.to}
+										onClick={() => setSidebarOpen(false)}
+										className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground lg:justify-center lg:px-0 [&.active]:bg-accent [&.active]:text-accent-foreground ${"spacing" in item ? "mt-2" : ""}`}
+									>
+										<item.icon className="size-4 shrink-0" />
+										<span className="lg:hidden">{item.label}</span>
+									</Link>
+								</TooltipTrigger>
+								<TooltipContent side="right">{item.label}</TooltipContent>
+							</Tooltip>
+						))}
+					</TooltipProvider>
 				</nav>
+				<div className="border-t border-border p-2">
+					<TooltipProvider delayDuration={1000}>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									variant="ghost"
+									onClick={() => setSettingsOpen(true)}
+									className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground lg:justify-center lg:px-0"
+								>
+									<Settings className="size-4 shrink-0" />
+									<span className="lg:hidden">Settings</span>
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="right">Settings</TooltipContent>
+						</Tooltip>
+					</TooltipProvider>
+				</div>
 			</aside>
 
 			{sidebarOpen && (
@@ -176,18 +239,25 @@ export function AppShell({ children }: { children: ReactNode }) {
 				/>
 			)}
 
-			<div className="flex min-w-0 flex-1 flex-col">
-				<header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-border bg-background/95 px-4 backdrop-blur">
-					<Button
-						variant="ghost"
-						size="icon"
-						className="lg:hidden"
-						onClick={() => setSidebarOpen(true)}
-						aria-label="Open sidebar"
-					>
-						<Menu />
-					</Button>
-					<div className="relative max-w-md flex-1">
+			<div className="flex min-w-0 flex-1 flex-col lg:ml-16">
+				<header className="sticky top-0 z-20 grid h-14 grid-cols-[1fr_auto_1fr] items-center gap-3 border-b border-border bg-background/95 px-4 backdrop-blur">
+					<div className="flex min-w-0 items-center gap-2">
+						<Button
+							variant="ghost"
+							size="icon"
+							className="lg:hidden"
+							onClick={() => setSidebarOpen(true)}
+							aria-label="Open sidebar"
+						>
+							<Menu />
+						</Button>
+						{HEADER_TITLES[location.pathname] && (
+							<h1 className="truncate text-xl font-semibold">
+								{HEADER_TITLES[location.pathname]}
+							</h1>
+						)}
+					</div>
+					<div className="relative w-full max-w-md">
 						<Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
 						<Input
 							ref={searchInputRef}
@@ -201,7 +271,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 							}}
 						/>
 					</div>
-					<div className="ml-auto flex items-center gap-1">
+					<div className="flex items-center justify-end gap-1">
 						<Button
 							variant="ghost"
 							size="icon"
@@ -219,6 +289,12 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 			<CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
 			<KeyboardHelp open={helpOpen} onOpenChange={setHelpOpen} />
+			<Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+				<DialogContent className="max-h-[80vh] overflow-y-auto">
+					<DialogTitle className="sr-only">Settings</DialogTitle>
+					<SettingsContent />
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }

@@ -1,12 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { BookmarksList, bookmarkListSearchSchema } from "#/components/bookmarks-list";
 
-export const Route = createFileRoute("/bookmarks/")({
+export const Route = createFileRoute("/starred")({
 	validateSearch: bookmarkListSearchSchema,
-	component: BookmarksListPage,
+	component: StarredPage,
 });
 
-function BookmarksListPage() {
+function StarredPage() {
 	const search = Route.useSearch();
-	return <BookmarksList search={search} to="/bookmarks" />;
+	return <BookmarksList search={{ ...search, starred: true }} to="/starred" hideStar showTotal />;
 }

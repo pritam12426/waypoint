@@ -20,25 +20,38 @@ import { MEDIA_SENTINEL } from "#/lib/api/types";
 
 const mediaModeSchema = z.enum(["auto", "default", "fetch"]);
 
-const bookmarkFormSchema = z.object({
-	url: z.string().url("Enter a valid URL"),
-	title: z.string(),
-	category: z.string(),
-	description: z.string(),
-	tags: z.array(z.string()),
-	keyword: z.string().transform((v) => v.trim().toLowerCase()),
-	// Mirrors the backend rule: a template must carry a `{%s}` placeholder
-	// unless empty (an empty value clears the template).
-	redirectTemplate: z.string().refine((v) => v === "" || v.includes("{%s}"), {
-		message: "A redirect template must contain {%s}",
-	}),
-	note: z.string(),
-	faviconUrl: z.string(),
-	faviconMode: mediaModeSchema,
-	thumbnailUrl: z.string(),
-	thumbnailMode: mediaModeSchema,
-	starred: z.boolean(),
-});
+const bookmarkFormSchema = z
+	.object({
+		url: z.string().url("Enter a valid URL"),
+		title: z.string(),
+		category: z.string(),
+		description: z.string(),
+		tags: z.array(z.string()),
+		keyword: z.string().transform((v) => v.trim().toLowerCase()),
+		// Mirrors the backend rule: a template must carry a `{%s}` placeholder
+		// unless empty (an empty value clears the template).
+		redirectTemplate: z.string().refine((v) => v === "" || v.includes("{%s}"), {
+			message: "A redirect template must contain {%s}",
+		}),
+		note: z.string(),
+		faviconUrl: z.string(),
+		faviconMode: mediaModeSchema,
+		thumbnailUrl: z.string(),
+		thumbnailMode: mediaModeSchema,
+		starred: z.boolean(),
+	})
+	.superRefine((v, ctx) => {
+		// Mirrors the backend rule: a redirect template is only reachable via
+		// the `/keywords/{keyword}` shortcut, so a template without a keyword
+		// would never fire.
+		if (v.redirectTemplate && !v.keyword) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["keyword"],
+				message: "A keyword is required to use a redirect template",
+			});
+		}
+	});
 
 export type BookmarkFormValues = z.infer<typeof bookmarkFormSchema>;
 

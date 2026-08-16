@@ -14,7 +14,6 @@ function KeywordsPage() {
 
 	return (
 		<div className="mx-auto max-w-xl space-y-4">
-			<h1 className="text-xl font-semibold">Keywords</h1>
 			<p className="text-sm text-muted-foreground">
 				Type a keyword into your browser's address bar to jump straight to its bookmark.
 			</p>

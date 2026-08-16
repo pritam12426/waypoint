@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
 	type BookmarkListParams,
 	type BulkDeleteParams,
+	type RandomParams,
 	adminApi,
 	authApi,
 	bookmarksApi,
@@ -14,7 +15,7 @@ import {
 	tagsApi,
 } from "./endpoints";
 import { invalidateAll, qk, queryClient } from "./query";
-import type { NewBookmark, UpdateBookmark } from "./types";
+import type { ActivityGranularity, NewBookmark, UpdateBookmark } from "./types";
 
 // ---------------------------------------------------------------- bookmarks
 
@@ -220,6 +221,18 @@ export function useSearch(
 	});
 }
 
+// ----------------------------------------------------------- random pool
+
+export function useRandomPool(params: RandomParams = {}) {
+	return useQuery({
+		queryKey: qk.random.pool(params),
+		queryFn: async () => {
+			const res = await bookmarksApi.random({ ...params, limit: 1 });
+			return Number(res.headers["x-total-count"] ?? res.data.length);
+		},
+	});
+}
+
 // ---------------------------------------------------------------- keywords
 
 export function useKeywords() {
@@ -272,10 +285,10 @@ export function useStatsNeverVisited(limit?: number, offset?: number) {
 	});
 }
 
-export function useStatsOrphanTags(limit?: number, offset?: number) {
+export function useStatsInactive(limit?: number, offset?: number) {
 	return useQuery({
-		queryKey: qk.stats.orphanTags({ limit, offset }),
-		queryFn: () => statsApi.orphanTags(limit, offset).then((r) => r.data),
+		queryKey: qk.stats.inactive({ limit, offset }),
+		queryFn: () => statsApi.inactive(limit, offset).then((r) => r.data),
 	});
 }
 
@@ -286,10 +299,10 @@ export function useStatsHygiene() {
 	});
 }
 
-export function useStatsActivity() {
+export function useStatsActivity(granularity: ActivityGranularity = "month") {
 	return useQuery({
-		queryKey: qk.stats.activity(),
-		queryFn: () => statsApi.activity().then((r) => r.data),
+		queryKey: qk.stats.activity(granularity),
+		queryFn: () => statsApi.activity(granularity).then((r) => r.data),
 	});
 }
 

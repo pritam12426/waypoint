@@ -13,7 +13,7 @@ export const Route = createFileRoute("/settings")({
 	component: SettingsPage,
 });
 
-function SettingsPage() {
+export function SettingsContent() {
 	const token = useApp((s) => s.token);
 	const setToken = useApp((s) => s.setToken);
 	const [draft, setDraft] = useState(token ?? "");
@@ -26,9 +26,7 @@ function SettingsPage() {
 	}
 
 	return (
-		<div className="mx-auto max-w-lg space-y-6">
-			<h1 className="text-xl font-semibold">Settings</h1>
-
+		<div className="space-y-6">
 			<Card>
 				<CardHeader>
 					<CardTitle>Access token</CardTitle>
@@ -95,6 +93,14 @@ function SettingsPage() {
 					</p>
 				</CardContent>
 			</Card>
+		</div>
+	);
+}
+
+function SettingsPage() {
+	return (
+		<div className="mx-auto max-w-lg">
+			<SettingsContent />
 		</div>
 	);
 }

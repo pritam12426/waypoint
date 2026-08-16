@@ -24,7 +24,6 @@ function TagsPage() {
 
 	return (
 		<div className="mx-auto max-w-xl space-y-4">
-			<h1 className="text-xl font-semibold">Tags</h1>
 			{isLoading && (
 				<div className="space-y-1">
 					{Array.from({ length: 6 }).map((_, i) => (
