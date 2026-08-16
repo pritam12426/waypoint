@@ -197,7 +197,7 @@ pub fn get_bookmark_tags(conn: &Connection, bookmark_id: i64) -> Result<Vec<Stri
 /// `limit`/`offset` page the list.
 pub fn orphan_tags(conn: &Connection, limit: usize, offset: usize) -> Result<Vec<OrphanTag>> {
 	let mut stmt = conn.prepare(
-		"SELECT t.name, b.id, b.title
+		"SELECT t.name, b.id, b.title, b.domain
          FROM tags t
          JOIN bookmark_tags bt ON bt.tag_id = t.id
          JOIN bookmarks b ON b.id = bt.bookmark_id AND b.trashed_at IS NULL
@@ -211,6 +211,7 @@ pub fn orphan_tags(conn: &Connection, limit: usize, offset: usize) -> Result<Vec
 			name: row.get(0)?,
 			bookmark_id: row.get(1)?,
 			bookmark_title: row.get(2)?,
+			domain: row.get(3)?,
 		})
 	})?;
 	let tags = rows.collect::<rusqlite::Result<Vec<_>>>()?;

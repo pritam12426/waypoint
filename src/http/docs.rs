@@ -159,8 +159,9 @@ const DOCS_UI_HTML: &str = r##"<!DOCTYPE html>
 pub struct ApiDoc;
 
 /// Declares the optional bearer-token security scheme. It's optional in the
-/// docs because the token only exists when the operator passes `--api-token`;
-/// unauthenticated servers still honor the same OpenAPI document.
+/// docs because the token only exists when the operator sets
+/// `WAYPOINTD_SERVE_TOKEN`; unauthenticated servers still honor the same
+/// OpenAPI document.
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {

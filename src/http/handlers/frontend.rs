@@ -103,6 +103,14 @@ async fn serve_asset(path: &str) -> Response {
 		return (StatusCode::NOT_FOUND, "not found").into_response();
 	};
 
+	// The hashed build outputs live under `assets/`; everything else
+	// (index.html, favicon.ico) is revalidated on every load.
+	let cache = if path.starts_with("assets/") {
+		CACHE_ASSETS
+	} else {
+		CACHE_INDEX
+	};
+
 	// Embedded copy: rust-embed keeps the data as `'static`
 	// borrowed bytes when possible, which avoids a copy; owned data is only
 	// produced for generated files. `Body::from_static` needs a `&'static
@@ -113,11 +121,14 @@ async fn serve_asset(path: &str) -> Response {
 			let mime = mime_guess::from_path(path).first_or_octet_stream();
 			let data = match file.data {
 				Cow::Borrowed(b) => b,
-				Cow::Owned(v) => return raw_response(StatusCode::OK, mime.as_ref(), Body::from(v)),
+				Cow::Owned(v) => {
+					return raw_response(StatusCode::OK, mime.as_ref(), cache, Body::from(v));
+				}
 			};
 			raw_response(
 				StatusCode::OK,
 				mime.as_ref(),
+				cache,
 				Body::from(Bytes::from_static(data)),
 			)
 		}
@@ -129,12 +140,18 @@ async fn serve_asset(path: &str) -> Response {
 				let data = match file.data {
 					Cow::Borrowed(b) => b,
 					Cow::Owned(v) => {
-						return raw_response(StatusCode::OK, "text/html", Body::from(v));
+						return raw_response(
+							StatusCode::OK,
+							"text/html",
+							CACHE_INDEX,
+							Body::from(v),
+						);
 					}
 				};
 				raw_response(
 					StatusCode::OK,
 					"text/html",
+					CACHE_INDEX,
 					Body::from(Bytes::from_static(data)),
 				)
 			}
@@ -146,10 +163,23 @@ async fn serve_asset(path: &str) -> Response {
 	}
 }
 
-fn raw_response(status: StatusCode, mime: &str, body: Body) -> Response {
+/// `Cache-Control` for content-hashed assets. Vite names every build output
+/// under `assets/` with a content hash, so a browser can cache them forever:
+/// a new build produces new file names, and `index.html` is what points at
+/// them. Without this header the browser re-downloads every JS chunk on
+/// every navigation.
+const CACHE_ASSETS: &str = "public, max-age=31536000, immutable";
+/// `Cache-Control` for un-hashed files (`index.html`, favicon). `index.html`
+/// is the pointer to the current hashed assets, so it must be revalidated on
+/// every load; it is a few KB, so a fresh fetch is cheaper than the risk of
+/// serving a stale hash map.
+const CACHE_INDEX: &str = "no-cache";
+
+fn raw_response(status: StatusCode, mime: &str, cache: &str, body: Body) -> Response {
 	Response::builder()
 		.status(status)
 		.header(header::CONTENT_TYPE, mime)
+		.header(header::CACHE_CONTROL, cache)
 		// Tells `log_request` this was a static frontend file so it logs at
 		// debug instead of info.
 		.header(X_WAYPOINT_STATIC, "1")

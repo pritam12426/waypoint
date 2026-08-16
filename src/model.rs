@@ -434,6 +434,7 @@ pub struct OrphanTag {
 	pub name: String,
 	pub bookmark_id: i64,
 	pub bookmark_title: String,
+	pub domain: Option<String>,
 }
 
 /// Hygiene counts over active bookmarks: how many are missing tags, notes,

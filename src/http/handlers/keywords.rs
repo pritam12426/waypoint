@@ -21,12 +21,29 @@ use crate::http::error::AppError;
 use crate::{
 	database::{bookmarks as bm_db, visits as vis_db},
 	http::AppState,
-	model::BookmarkFilter,
+	model::{Bookmark, BookmarkFilter},
 };
 
 // ============================================================
 // Keyword redirect (public — no auth, opened from a browser bar)
 // ============================================================
+
+/// All active (non-trashed, non-archived) bookmarks that carry a keyword.
+async fn keyword_bookmarks(state: &AppState) -> Result<Vec<Bookmark>, AppError> {
+	let filter = BookmarkFilter {
+		archived: Some(false),
+		trash: false,
+		limit: Some(100_000),
+		offset: None,
+		..Default::default()
+	};
+	let db = state.db.clone();
+	Ok(tokio::task::spawn_blocking(move || {
+		let conn = db.reader();
+		bm_db::list_keywords(&conn, &filter)
+	})
+	.await??)
+}
 
 /// List keyword shortcuts as newline-separated plain text.
 #[utoipa::path(
@@ -41,19 +58,7 @@ pub async fn keyword_list(
 	ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Response, AppError> {
 	crate::log_debug!("{addr} GET /keywords");
-	let filter = BookmarkFilter {
-		archived: Some(false),
-		trash: false,
-		limit: Some(100_000),
-		offset: None,
-		..Default::default()
-	};
-	let db = state.db.clone();
-	let bookmarks = tokio::task::spawn_blocking(move || {
-		let conn = db.reader();
-		bm_db::list_keywords(&conn, &filter)
-	})
-	.await??;
+	let bookmarks = keyword_bookmarks(&state).await?;
 	crate::log_info!("{addr} listed {} keywords", bookmarks.len());
 	let body = bookmarks
 		.iter()
@@ -136,13 +141,28 @@ pub async fn keyword_redirect(
 		None => {
 			// A missing keyword is a plain 404 with a text body — this
 			// route is outside `/api` and returns text, not the JSON error
-			// contract.
+			// contract. The body lists every known shortcut so a typo in
+			// the address bar is self-correcting.
 			crate::log_warn!("{addr} no bookmark for keyword \"{keyword}\"");
-			Ok((
-				StatusCode::NOT_FOUND,
-				format!("no bookmark for keyword \"{keyword}\"\n"),
-			)
-				.into_response())
+			let bookmarks = keyword_bookmarks(&state).await?;
+			let mut body = format!("no bookmark for keyword \"{keyword}\"\n\nAll keywords\n");
+			let width = bookmarks
+				.iter()
+				.filter_map(|b| b.keyword.as_deref())
+				.map(str::len)
+				.max()
+				.unwrap_or(0);
+			for b in &bookmarks {
+				let Some(kw) = b.keyword.as_deref() else {
+					continue;
+				};
+				body.push_str(&format!("    {0:<1$}  {2}", kw, width, b.url));
+				if let Some(t) = &b.redirect_template {
+					body.push_str(&format!("  ({t})"));
+				}
+				body.push('\n');
+			}
+			Ok((StatusCode::NOT_FOUND, body).into_response())
 		}
 	}
 }
