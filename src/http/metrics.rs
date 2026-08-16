@@ -70,6 +70,17 @@ pub struct Metrics {
 	started: Instant,
 }
 
+/// Decrements the in-flight gauge when dropped, so the gauge can't leak when
+/// a handler future is aborted mid-request (client disconnect, timeout)
+/// rather than completing normally.
+pub struct InFlightGuard<'a>(&'a Metrics);
+
+impl Drop for InFlightGuard<'_> {
+	fn drop(&mut self) {
+		self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+	}
+}
+
 impl Default for Metrics {
 	fn default() -> Self {
 		Self {
@@ -90,11 +101,20 @@ impl Metrics {
 		}
 	}
 
-	/// Records one completed request: increments the in-flight gauge around
-	/// the handler and appends to the counter/histogram afterwards. Call it
-	/// from the outer logging middleware, which wraps every route.
-	pub fn observe(&self, method: &str, path: &str, status: u16, elapsed: std::time::Duration) {
+	/// Marks a request as in-flight and returns a guard that clears the mark
+	/// when it drops. Call it immediately before the handler runs, from the
+	/// outer logging middleware, so the gauge reflects real concurrency
+	/// rather than the moment the request finished — and the guard, not a
+	/// paired call, ensures the decrement runs even if the handler future is
+	/// dropped (client disconnect) instead of completing.
+	pub fn request_started(&self) -> InFlightGuard<'_> {
 		self.in_flight.fetch_add(1, Ordering::Relaxed);
+		InFlightGuard(self)
+	}
+
+	/// Records one completed request: appends to the counter/histogram.
+	/// Call it from the outer logging middleware, which wraps every route.
+	pub fn observe(&self, method: &str, path: &str, status: u16, elapsed: std::time::Duration) {
 		let label_path = sanitize_path(path);
 		let secs = elapsed.as_secs_f64();
 
@@ -123,7 +143,6 @@ impl Metrics {
 				*self.duration_sum.lock().unwrap().entry(key).or_insert(0.0) += secs;
 			}
 		}
-		self.in_flight.fetch_sub(1, Ordering::Relaxed);
 	}
 
 	/// Renders everything in Prometheus text format. `db` supplies the

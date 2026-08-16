@@ -36,6 +36,10 @@ struct Entry<T> {
 pub struct Cache<T> {
 	inner: Mutex<HashMap<String, Entry<T>>>,
 	ttl: Duration,
+	/// When set, `put` drops the oldest entry once the map exceeds this.
+	/// Client-chosen keys (filter strings, limits, offsets) can otherwise
+	/// grow the map without bound over a TTL window.
+	max_entries: Option<usize>,
 }
 
 impl<T> Cache<T> {
@@ -43,6 +47,16 @@ impl<T> Cache<T> {
 		Self {
 			inner: Mutex::new(HashMap::new()),
 			ttl,
+			max_entries: None,
+		}
+	}
+
+	/// A cache that drops its oldest entry once `max_entries` is exceeded.
+	pub fn bounded(ttl: Duration, max_entries: usize) -> Self {
+		Self {
+			inner: Mutex::new(HashMap::new()),
+			ttl,
+			max_entries: Some(max_entries),
 		}
 	}
 
@@ -66,13 +80,23 @@ impl<T> Cache<T> {
 	}
 
 	pub fn put(&self, key: &str, value: T) {
-		self.inner.lock().unwrap().insert(
+		let mut inner = self.inner.lock().unwrap();
+		inner.insert(
 			key.to_owned(),
 			Entry {
 				at: Instant::now(),
 				value,
 			},
 		);
+		if let Some(max) = self.max_entries
+			&& inner.len() > max
+			&& let Some(oldest) = inner
+				.iter()
+				.min_by_key(|(_, e)| e.at)
+				.map(|(k, _)| k.clone())
+		{
+			inner.remove(&oldest);
+		}
 		crate::log_trace!("cache stored for {key:?}");
 	}
 
@@ -102,5 +126,16 @@ mod tests {
 		assert_eq!(cache.get("k"), Some(7));
 		cache.invalidate();
 		assert_eq!(cache.get("k"), None);
+	}
+
+	#[test]
+	fn bounded_evicts_oldest() {
+		let cache = Cache::bounded(Duration::from_secs(5), 2);
+		cache.put("a", 1);
+		cache.put("b", 2);
+		cache.put("c", 3);
+		assert_eq!(cache.get("a"), None);
+		assert_eq!(cache.get("b"), Some(2));
+		assert_eq!(cache.get("c"), Some(3));
 	}
 }

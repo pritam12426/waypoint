@@ -47,6 +47,10 @@ const TTL: Duration = Duration::from_secs(10 * 60);
 /// keys are client-chosen, so this caps memory from a misbehaving client.
 const MAX_KEY_LEN: usize = 64;
 
+/// Cap on stored keys; beyond it the oldest entries are evicted so a client
+/// spraying fresh keys can't grow memory for the full [`TTL`] window.
+const MAX_ENTRIES: usize = 1000;
+
 /// A remembered request/response pair for one key.
 struct Entry {
 	/// When the original request ran — used for expiry.
@@ -89,7 +93,20 @@ impl IdempotencyStore {
 	}
 
 	fn put(&self, key: &str, request_hash: u64, status: StatusCode, body: Vec<u8>) {
-		self.inner.lock().unwrap().insert(
+		let mut inner = self.inner.lock().unwrap();
+		if inner.len() >= MAX_ENTRIES {
+			// Expire what we can, then drop the oldest survivor. Done
+			// in the rare over-cap case only, so the hot path stays clean.
+			inner.retain(|_, e| e.at.elapsed() <= TTL);
+			if let Some(oldest) = inner
+				.iter()
+				.min_by_key(|(_, e)| e.at)
+				.map(|(k, _)| k.clone())
+			{
+				inner.remove(&oldest);
+			}
+		}
+		inner.insert(
 			key.to_owned(),
 			Entry {
 				at: Instant::now(),

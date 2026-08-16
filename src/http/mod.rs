@@ -198,8 +198,8 @@ pub async fn run(settings: Settings) -> Result<()> {
 	let db_arc = Arc::new(db);
 	let state = AppState {
 		db: db_arc.clone(),
-		counts: Arc::new(cache::Cache::new(Duration::from_secs(5))),
-		stats: Arc::new(cache::Cache::new(Duration::from_secs(30))),
+		counts: Arc::new(cache::Cache::bounded(Duration::from_secs(5), 256)),
+		stats: Arc::new(cache::Cache::bounded(Duration::from_secs(30), 64)),
 		jobs: Arc::new(Jobs::new()),
 		api_token: settings.api_token.clone(),
 		read_token: settings.read_token.clone(),
@@ -418,6 +418,9 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
 	// so a request's log lines can be grepped out together even when they
 	// interleave.
 	let ctx = crate::logging::RequestCtx::new(method.as_str(), &path);
+	// The guard decrements the gauge when it drops, so an aborted request
+	// (client disconnect mid-handler) can't leak the counter.
+	let _in_flight = state.metrics.request_started();
 	let response = crate::logging::with_request(ctx, next.run(req)).await;
 	let status = response.status();
 	let elapsed = started.elapsed();
