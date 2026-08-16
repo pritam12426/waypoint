@@ -267,6 +267,13 @@ where
 		if any.to_string().contains("already in use by bookmark") {
 			return AppError::conflict_keyword(any.to_string());
 		}
+		// `database::bookmarks` refuses to store a redirect template that
+		// has no keyword shortcut to trigger it — surface that as a friendly
+		// 400 invalid_payload, not a 500. Keep the message in sync with the
+		// DB-side guard.
+		if any.to_string().contains("requires a keyword") {
+			return AppError::invalid_payload(any.to_string());
+		}
 		// Anything that surfaces as a SQLite failure (unique constraint on
 		// update, etc.) goes through `classify_sqlite`; the guard `let`
 		// chain means we only take the classification when it says "this is

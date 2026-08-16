@@ -187,6 +187,11 @@ Body (`NewBookmark`); only `url` is required:
 
 - `title` defaults to the URL. `category` defaults to `Uncategorized`.
 - `keyword` of `""` or null means "no keyword".
+- `redirect_template` (not shown above) is a URL template with a `{%s}`
+  placeholder, filled by the `/keywords/{keyword}` shortcut. It requires
+  `keyword` to be set: a template without one would never fire, so the server
+  rejects it with a 400 `invalid_payload` ("a redirect template requires a
+  keyword").
 - `favicon`/`thumbnail`: null = auto-resolve; `favicon: ""` forces the
   generic domain favicon; `thumbnail: ""` stores none.
 - `favicon_mode`/`thumbnail_mode` are `"auto"` (default) | `"default"` |
@@ -215,10 +220,14 @@ trashed. Convenient for piping to a file: `waypoint note 5 > notes/5.md`.
 
 Tri-state semantics: `null` or absent field = leave unchanged. `tags` is a
 full replacement (empty array clears); `add_tags`/`remove_tags` patch
-incrementally. `keyword: ""` clears it. `refresh: true` re-fetches the
-favicon/thumbnail for this bookmark, bypassing the 90-day media cache (and
-rewriting it with the fresh result). `url` of `""` is a 400. Returns 200 +
-`Bookmark`; 404 if the id is gone; 409 on URL/keyword collisions.
+incrementally. `keyword: ""` clears it. `redirect_template` is tri-state like
+`keyword`, and the same rule as create applies: the resulting row must not
+have a template without a keyword (400 `invalid_payload`), so clearing the
+keyword of a bookmark that has a template is rejected too. `refresh: true`
+re-fetches the favicon/thumbnail for this bookmark, bypassing the 90-day
+media cache (and rewriting it with the fresh result). `url` of `""` is a 400.
+Returns 200 + `Bookmark`; 404 if the id is gone; 409 on URL/keyword
+collisions.
 
 ### `DELETE /api/bookmarks/{id}` — delete
 

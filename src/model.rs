@@ -135,7 +135,9 @@ pub struct NewBookmark {
 	pub tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
 	/// Optional URL template with a `{%s}` placeholder. When set (and
-	/// non-empty) it must contain `{%s}`; an empty string stores no template.
+	/// non-empty) it must contain `{%s}` and a non-empty `keyword` (the
+	/// template is only reachable through the keyword shortcut); an empty
+	/// string stores no template.
 	pub redirect_template: Option<String>,
 	pub note: Option<String>,
 	/// Favicon URL, or `""` to force the generic domain favicon
@@ -181,7 +183,8 @@ pub struct UpdateBookmark {
 	pub remove_tags: Option<Vec<String>>,
 	pub keyword: Option<String>,
 	/// Tri-state like `keyword`: `Some("")` clears the template, `Some(x)`
-	/// sets it (must contain `{%s}`), `None` leaves it unchanged.
+	/// sets it (must contain `{%s}` and be paired with a keyword), `None`
+	/// leaves it unchanged.
 	pub redirect_template: Option<String>,
 	pub note: Option<String>,
 	/// Favicon URL to set, `""` to reset to the generic domain favicon

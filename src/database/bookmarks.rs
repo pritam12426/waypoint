@@ -277,6 +277,21 @@ pub fn insert_resolved(
 		.filter(|t| !t.trim().is_empty())
 		.unwrap_or_else(|| new.url.clone());
 
+	// A redirect template is only reachable through the `/keywords/{keyword}`
+	// shortcut; without a keyword there is no address-bar hook to trigger it,
+	// so a stored template would silently never fire.
+	if new
+		.redirect_template
+		.as_deref()
+		.is_some_and(|t| !t.is_empty())
+		&& new.keyword.as_deref().is_none_or(|k| k.is_empty())
+	{
+		return Err(anyhow::anyhow!(
+			"a redirect template requires a keyword — without one there is no shortcut to \
+			 trigger it; add a keyword or clear the template"
+		));
+	}
+
 	if let Err(err) = conn.execute(
 		"INSERT INTO bookmarks
             (title, url, description, domain, category_id, starred, keyword, note,
@@ -791,6 +806,16 @@ pub fn update_resolved(
 		|| category_id != existing.category_id;
 
 	if changed {
+		// Same invariant as `insert_resolved`: never write a stored template
+		// that has no keyword shortcut to trigger it. Checked only when the
+		// row is actually written, so a no-op update on a legacy violating
+		// row is not blocked from fixing *other* fields.
+		if redirect_template.is_some() && keyword.is_none() {
+			return Err(anyhow::anyhow!(
+				"a redirect template requires a keyword — without one there is no shortcut to \
+				 trigger it; add a keyword or clear the template"
+			));
+		}
 		if let Err(err) = conn.execute(
 			"UPDATE bookmarks SET
 	            title = ?1, url = ?2, description = ?3, domain = ?4, category_id = ?5,

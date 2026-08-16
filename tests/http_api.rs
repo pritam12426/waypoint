@@ -499,6 +499,93 @@ async fn redirect_template_requires_placeholder_on_create_and_update() {
 }
 
 #[tokio::test]
+async fn redirect_template_requires_a_keyword_on_create_and_update() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	// Create with a template but no keyword → 400 invalid_payload.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://search.example",
+				"redirect_template": "https://search.example/q?q={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+	// A bookmark with a keyword stores the template fine.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(
+			json!({
+				"url": "https://search.example",
+				"keyword": "s",
+				"redirect_template": "https://search.example/q?q={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let id = created["id"].as_i64().unwrap();
+
+	// Clearing the keyword while the template stays → 400.
+	let res = request(
+		&state,
+		Method::PUT,
+		&format!("/api/bookmarks/{id}"),
+		Body::from(json!({ "keyword": "" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+	// Setting a template on a keywordless bookmark → 400.
+	let res = request(
+		&state,
+		Method::POST,
+		"/api/bookmarks",
+		Body::from(json!({ "url": "https://keywordless.example" }).to_string()),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::CREATED);
+	let created: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+	let no_keyword_id = created["id"].as_i64().unwrap();
+	let res = request(
+		&state,
+		Method::PUT,
+		&format!("/api/bookmarks/{no_keyword_id}"),
+		Body::from(
+			json!({
+				"redirect_template": "https://search.example/q?q={%s}",
+			})
+			.to_string(),
+		),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+	// The error message names the fix.
+	let res = request(
+		&state,
+		Method::PUT,
+		&format!("/api/bookmarks/{id}"),
+		Body::from(json!({ "keyword": "" }).to_string()),
+	)
+	.await;
+	let text = body_text(res).await;
+	assert!(text.contains("requires a keyword"), "{text}");
+}
+
+#[tokio::test]
 async fn open_bookmark_is_public_and_tracks_visits() {
 	silence_logs();
 	let (_dir, state) = test_state();
