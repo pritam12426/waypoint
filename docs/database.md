@@ -154,9 +154,10 @@ Every connection gets the same pragmas, set in `apply_pragmas`
 - `journal_mode = WAL` + `synchronous = NORMAL` — readers proceed while the
   writer commits; a power loss may lose the most recent transactions but
   never corrupts the database (the WAL rebuilds from the last checkpoint).
-- `cache_size = -32768` (~32 MiB page cache), `temp_store = MEMORY` (keeps
-  ORDER BY / GROUP BY temp b-trees in RAM), `mmap_size = 256 MiB` (reads
-  avoid page-cache syscalls).
+- `cache_size = -32768` (~32 MiB page cache, tunable via
+  `WAYPOINTD_DB_CACHE_SIZE`), `temp_store = MEMORY` (keeps ORDER BY / GROUP BY
+  temp b-trees in RAM), `mmap_size = 256 MiB` (reads avoid page-cache
+  syscalls; tunable via `WAYPOINTD_DB_MMAP_SIZE`).
 
 On graceful shutdown the server runs `PRAGMA wal_checkpoint(TRUNCATE)` on
 the writer before the pool drops, so the `-wal`/`-shm` sidecars come out

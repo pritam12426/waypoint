@@ -17,6 +17,10 @@
 //! # Environment variables
 //!
 //! * `WAYPOINTD_DB_FILE`   — SQLite database path (default `waypoint.sqlite`)
+//! * `WAYPOINTD_DB_CACHE_SIZE`— SQLite page-cache size per connection, in
+//!   KiB (default `32768` = 32 MiB; `0` lets SQLite pick)
+//! * `WAYPOINTD_DB_MMAP_SIZE`— SQLite read-only mmap ceiling in bytes
+//!   (default `268435456` = 256 MiB; `0` disables mmap)
 //! * `WAYPOINTD_SERVE_HOST`— bind host (default `localhost`)
 //! * `WAYPOINTD_SERVE_PORT`— bind port (default `8080`)
 //! * `WAYPOINTD_SERVE_TOKEN`— optional full-access token for `/api/*` + docs
@@ -42,6 +46,15 @@ use std::path::PathBuf;
 
 /// Default SQLite database file.
 pub const DEFAULT_DB_FILE: &str = "waypoint.sqlite";
+
+/// Default per-connection page cache, in KiB (the `cache_size` pragma's
+/// negative/KiB form). 32 MiB is the fixed value the pool always used.
+pub const DEFAULT_DB_CACHE_SIZE_KIB: i64 = 32 * 1024;
+
+/// Default read-only mmap ceiling, in bytes (the `mmap_size` pragma). This
+/// is *virtual* address space, not committed RAM — pages are faulted in on
+/// demand and evictable under pressure, so reads avoid page-cache syscalls.
+pub const DEFAULT_DB_MMAP_SIZE: i64 = 256 * 1024 * 1024;
 
 /// Default host to bind (`localhost` — deliberately not `0.0.0.0`, so the
 /// server is only reachable on this machine unless the user asks for more).
@@ -88,6 +101,19 @@ pub fn db_file() -> PathBuf {
 		.map(PathBuf::from)
 		.filter(|p| !p.as_os_str().is_empty())
 		.unwrap_or_else(|| PathBuf::from(DEFAULT_DB_FILE))
+}
+
+/// Per-connection page cache in KiB, from `WAYPOINTD_DB_CACHE_SIZE`
+/// (default 32768 = 32 MiB). `0` is passed through — SQLite then uses its
+/// own default (~2 MiB).
+pub fn db_cache_size_kib() -> i64 {
+	env_u64("WAYPOINTD_DB_CACHE_SIZE", DEFAULT_DB_CACHE_SIZE_KIB as u64) as i64
+}
+
+/// Read-only mmap ceiling in bytes, from `WAYPOINTD_DB_MMAP_SIZE`
+/// (default 256 MiB). `0` disables mmap entirely.
+pub fn db_mmap_size() -> i64 {
+	env_u64("WAYPOINTD_DB_MMAP_SIZE", DEFAULT_DB_MMAP_SIZE as u64) as i64
 }
 
 /// Reads the bind host from `WAYPOINTD_SERVE_HOST`.

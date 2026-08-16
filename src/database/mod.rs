@@ -41,7 +41,7 @@ mod tests;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -64,6 +64,45 @@ pub struct Db {
 	writer: Mutex<Connection>,
 	readers: Vec<Mutex<Connection>>,
 	next: AtomicUsize,
+	/// Where this pool lives on disk (or the `file:` URI for the test-only
+	/// in-memory pool). Backup and the size gauges open it on their own.
+	db_path: PathBuf,
+}
+
+/// Live size/growth numbers sampled from the database file and its pages.
+/// Feeds the `/metrics` gauges and the weekly maintenance log line.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DbStats {
+	/// Size of the main database file on disk (bytes).
+	pub file_bytes: u64,
+	/// Size of the `-wal` sidecar (bytes) — uncheckpointed committed frames.
+	pub wal_bytes: u64,
+	/// Total pages in the database (regardless of fullness).
+	pub page_count: i64,
+	/// Unused pages on the freelist — grows without a `VACUUM`.
+	pub freelist_pages: i64,
+}
+
+/// Per-connection SQLite tunables that cost memory. The server-wide values
+/// come from `WAYPOINTD_DB_CACHE_SIZE` / `WAYPOINTD_DB_MMAP_SIZE` (see
+/// `config.rs`); the defaults are what the pool always used.
+#[derive(Debug, Clone, Copy)]
+pub struct DbPragmas {
+	/// Page cache per connection, in KiB (the `cache_size` pragma's negative
+	/// form). `0` falls back to SQLite's own default.
+	pub cache_size_kib: i64,
+	/// Read-only mmap ceiling in bytes (the `mmap_size` pragma). This is
+	/// virtual address space, not committed RAM. `0` disables mmap.
+	pub mmap_size: i64,
+}
+
+impl Default for DbPragmas {
+	fn default() -> Self {
+		Self {
+			cache_size_kib: crate::config::DEFAULT_DB_CACHE_SIZE_KIB,
+			mmap_size: crate::config::DEFAULT_DB_MMAP_SIZE,
+		}
+	}
 }
 
 impl Db {
@@ -72,20 +111,31 @@ impl Db {
 	/// open *after* the writer is fully migrated, so they never see a
 	/// half-applied schema.
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-		let path = path.as_ref();
-		let writer = open(path)?;
+		Self::open_with(path, DbPragmas::default())
+	}
+
+	/// [`Db::open`] with explicit per-connection pragmas — the tunable half
+	/// of the server's RAM story (page cache + mmap), driven by the
+	/// `WAYPOINTD_DB_*` env vars. The pool applies the same pragmas to every
+	/// connection.
+	pub fn open_with(path: impl AsRef<Path>, pragmas: DbPragmas) -> Result<Self> {
+		let path = path.as_ref().to_path_buf();
+		let writer = open_with_flags(&path, rusqlite::OpenFlags::default(), pragmas)?;
 		let readers = (0..READ_POOL_SIZE)
-			.map(|_| open_reader(path))
+			.map(|_| open_reader(&path, pragmas))
 			.collect::<Result<Vec<_>>>()?;
 		crate::log_debug!(
-			"opened connection pool (1 writer + {} readers) for {}",
+			"opened connection pool (1 writer + {} readers) for {} (cache {} KiB, mmap {} bytes)",
 			READ_POOL_SIZE,
-			path.display()
+			path.display(),
+			pragmas.cache_size_kib,
+			pragmas.mmap_size
 		);
 		Ok(Self {
 			writer: Mutex::new(writer),
 			readers: readers.into_iter().map(Mutex::new).collect(),
 			next: AtomicUsize::new(0),
+			db_path: path,
 		})
 	}
 
@@ -99,14 +149,16 @@ impl Db {
 		use rusqlite::OpenFlags;
 		let uri = "file:waypoint-test?mode=memory&cache=shared";
 		let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_URI;
-		let writer = open_with_flags(uri, flags)?;
+		let pragmas = DbPragmas::default();
+		let writer = open_with_flags(uri, flags, pragmas)?;
 		let readers = (0..READ_POOL_SIZE)
-			.map(|_| open_reader_with_flags(uri))
+			.map(|_| open_reader_with_flags(uri, flags, pragmas))
 			.collect::<Result<Vec<_>>>()?;
 		Ok(Self {
 			writer: Mutex::new(writer),
 			readers: readers.into_iter().map(Mutex::new).collect(),
 			next: AtomicUsize::new(0),
+			db_path: PathBuf::from(uri),
 		})
 	}
 
@@ -161,23 +213,105 @@ impl Db {
 	}
 
 	/// Writes a consistent `VACUUM INTO` snapshot of the database to
-	/// `dest` (an absolute path). Best effort like the checkpoints: skips if
-	/// the writer is held. `VACUUM INTO` produces a fresh, fully-rewritten
-	/// database file — no WAL sidecars, no uncheckpointed frames — so a
-	/// backup can be copied/stored as a single self-contained file.
+	/// `dest` (an absolute path) and sanity-checks the result. Runs on a
+	/// throwaway read-only connection of its own, so it never takes the
+	/// writer lock: WAL readers proceed alongside the writer, and
+	/// `VACUUM INTO` reads a consistent snapshot into a fresh,
+	/// fully-rewritten file — no WAL sidecars, no uncheckpointed frames —
+	/// so a backup can be copied/stored as a single self-contained file.
 	pub fn backup(&self, dest: &Path) -> Result<()> {
-		let writer = self
-			.writer
-			.lock()
-			.map_err(|_| anyhow::anyhow!("writer poisoned"))?;
-		writer
-			.execute_batch(&format!(
-				"VACUUM INTO '{}';",
-				dest.display().to_string().replace('\'', "''")
-			))
-			.with_context(|| format!("VACUUM INTO backup to {} failed", dest.display()))?;
+		let conn = Connection::open_with_flags(
+			&self.db_path,
+			rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+		)
+		.with_context(|| {
+			format!(
+				"failed to open {} read-only for backup",
+				self.db_path.display()
+			)
+		})?;
+		conn.execute_batch(&format!(
+			"VACUUM INTO '{}';",
+			dest.display().to_string().replace('\'', "''")
+		))
+		.with_context(|| format!("VACUUM INTO backup to {} failed", dest.display()))?;
+		verify_backup(dest)?;
 		Ok(())
 	}
+
+	/// Live size/growth numbers: cheap PRAGMA reads plus two `stat` calls,
+	/// all off the writer. Feeds the `/metrics` gauges and the maintenance
+	/// log line.
+	pub fn stats(&self) -> DbStats {
+		let (page_count, freelist_pages) = {
+			let reader = self.reader();
+			let page_count = reader
+				.pragma_query_value(None, "page_count", |r| r.get(0))
+				.unwrap_or(0);
+			let freelist_pages = reader
+				.pragma_query_value(None, "freelist_count", |r| r.get(0))
+				.unwrap_or(0);
+			(page_count, freelist_pages)
+		};
+		let file_bytes = std::fs::metadata(&self.db_path)
+			.map(|m| m.len())
+			.unwrap_or(0);
+		let wal_bytes = std::fs::metadata(format!("{}-wal", self.db_path.display()))
+			.map(|m| m.len())
+			.unwrap_or(0);
+		DbStats {
+			file_bytes,
+			wal_bytes,
+			page_count,
+			freelist_pages,
+		}
+	}
+
+	/// Weekly health pass: `PRAGMA optimize` (FTS index + query planner)
+	/// then `PRAGMA quick_check` (corruption scan). Runs on a pooled reader,
+	/// so it never blocks writes. A full `VACUUM` is deliberately not
+	/// scheduled — it rewrites the whole file under the writer lock;
+	/// freelist growth is visible in `stats` if it ever needs one.
+	// # ponytail: quick_check reads every page (~seconds on a large DB) but
+	// runs once a week on a reader; add a real VACUUM schedule if the
+	// freelist keeps growing.
+	pub fn run_maintenance(&self) -> Result<()> {
+		let reader = self.reader();
+		reader.execute_batch("PRAGMA optimize;")?;
+		let verdict: String = reader.pragma_query_value(None, "quick_check", |r| r.get(0))?;
+		if verdict != "ok" {
+			anyhow::bail!("quick_check reported: {verdict}");
+		}
+		Ok(())
+	}
+}
+
+/// Cheap sanity check that a just-written backup is real and openable: the
+/// SQLite header magic plus a schema read. A full `PRAGMA integrity_check`
+/// reads every page (seconds on a large DB) and is skipped; the weekly
+/// `run_maintenance` pass covers deeper scans.
+// # ponytail: header+schema only; switch to integrity_check on the backup
+// if a corrupted snapshot ever slips through.
+fn verify_backup(path: &Path) -> Result<()> {
+	use std::io::Read;
+	const HEADER: &[u8] = b"SQLite format 3\0";
+	let mut head = [0u8; 16];
+	std::fs::File::open(path)
+		.with_context(|| format!("backup {} unreadable after write", path.display()))?
+		.read_exact(&mut head)
+		.with_context(|| format!("backup {} is truncated", path.display()))?;
+	if head != *HEADER {
+		anyhow::bail!(
+			"backup {} is not a SQLite database (bad header)",
+			path.display()
+		);
+	}
+	let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+	conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+		r.get::<_, i64>(0)
+	})
+	.with_context(|| format!("backup {} is not openable", path.display()))?;
+	Ok(())
 }
 
 /// The prefix every automated backup file is named with (before the
@@ -260,17 +394,26 @@ const LEGACY_FTS_TRIGGERS: &[&str] = &[
 /// fresh and legacy DBs) → `legacy_postclean` (repair search-index state
 /// the old triggers let rot).
 pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
-	open_with_flags(path.as_ref(), rusqlite::OpenFlags::default())
+	open_with_flags(
+		path.as_ref(),
+		rusqlite::OpenFlags::default(),
+		DbPragmas::default(),
+	)
 }
 
-/// [`open`] with explicit open flags — the one test-only caller (the
-/// in-memory pool) needs `SQLITE_OPEN_URI` for shared-cache `file:` URIs.
-fn open_with_flags<P: AsRef<Path>>(path: P, flags: rusqlite::OpenFlags) -> Result<Connection> {
+/// [`open`] with explicit open flags and pragmas — the test-only in-memory
+/// pool needs `SQLITE_OPEN_URI` for shared-cache `file:` URIs, and the
+/// server pool passes its env-derived `DbPragmas`.
+fn open_with_flags<P: AsRef<Path>>(
+	path: P,
+	flags: rusqlite::OpenFlags,
+	pragmas: DbPragmas,
+) -> Result<Connection> {
 	let path = path.as_ref();
 	crate::log_debug!("opening database at {}", path.display());
 	let mut conn = Connection::open_with_flags(path, flags)
 		.with_context(|| format!("failed to open database at {}", path.display()))?;
-	apply_pragmas(&mut conn)?;
+	apply_pragmas(&mut conn, pragmas)?;
 
 	// Detect pre-versioned databases so they get the pre/post clean passes
 	// around the schema init batch.
@@ -298,27 +441,27 @@ fn open_with_flags<P: AsRef<Path>>(path: P, flags: rusqlite::OpenFlags) -> Resul
 /// Opens a pooled reader connection: same pragmas as the writer, but no
 /// schema init or seeding — the writer is guaranteed to have run them first
 /// (`Db::open` opens readers only after the writer is ready).
-fn open_reader(path: &Path) -> Result<Connection> {
-	crate::log_trace!("opening pooled reader connection for {}", path.display());
-	let mut conn = Connection::open(path)?;
-	apply_pragmas(&mut conn)?;
-	Ok(conn)
+fn open_reader(path: &Path, pragmas: DbPragmas) -> Result<Connection> {
+	open_reader_with_flags(path, rusqlite::OpenFlags::default(), pragmas)
 }
 
-/// Test-only twin of [`open_reader`] that enables `file:` URI support (used
-/// by the shared-cache in-memory pool).
-#[cfg(test)]
-fn open_reader_with_flags(uri: &str) -> Result<Connection> {
-	use rusqlite::OpenFlags;
-	let mut conn =
-		Connection::open_with_flags(uri, OpenFlags::default().union(OpenFlags::SQLITE_OPEN_URI))?;
-	apply_pragmas(&mut conn)?;
+/// The URI variant of [`open_reader`] (used by the shared-cache in-memory
+/// pool, where `file:` URIs need `SQLITE_OPEN_URI`).
+fn open_reader_with_flags(
+	path: impl AsRef<Path>,
+	flags: rusqlite::OpenFlags,
+	pragmas: DbPragmas,
+) -> Result<Connection> {
+	let path = path.as_ref();
+	crate::log_trace!("opening pooled reader connection for {}", path.display());
+	let mut conn = Connection::open_with_flags(path, flags)?;
+	apply_pragmas(&mut conn, pragmas)?;
 	Ok(conn)
 }
 
 /// The shared connection setup for every connection in the process. Must be
 /// set outside any transaction.
-fn apply_pragmas(conn: &mut Connection) -> Result<()> {
+fn apply_pragmas(conn: &mut Connection, pragmas: DbPragmas) -> Result<()> {
 	// Must be set outside any transaction — it is a no-op inside one — and
 	// before the schema init batch touches data. FK enforcement is what makes
 	// `ON DELETE CASCADE` (tags, bookmark_tags) and the category reassignment
@@ -342,17 +485,22 @@ fn apply_pragmas(conn: &mut Connection) -> Result<()> {
 	// the database (the WAL is rebuilt from the last checkpoint).
 	conn.pragma_update(None, "synchronous", "NORMAL")
 		.context("failed to set synchronous pragma")?;
-	// ~32 MiB page cache shared across connections in-process.
-	conn.pragma_update(None, "cache_size", -32768_i64)
+	// Page cache shared across the pool's connections — the biggest
+	// committed-RAM number in the process. Tunable via WAYPOINTD_DB_CACHE_SIZE
+	// (KiB, `0` = SQLite's default); the negative form tells SQLite the
+	// value is KiB rather than pages.
+	conn.pragma_update(None, "cache_size", -pragmas.cache_size_kib)
 		.context("failed to set cache_size pragma")?;
 	// temp_store=MEMORY keeps the ORDER BY / GROUP BY temp b-trees (the
 	// pre-index list sorts and the stats aggregates) in RAM instead of
 	// spilling to disk.
 	conn.pragma_update(None, "temp_store", "MEMORY")
 		.context("failed to set temp_store pragma")?;
-	// Up to 256 MiB of the database is mapped read-only, so reads avoid
-	// page-cache syscalls entirely.
-	conn.pragma_update(None, "mmap_size", 268_435_456_i64)
+	// Up to this much of the database is mapped read-only, so reads avoid
+	// page-cache syscalls entirely. Virtual address space, not committed
+	// RAM — pages are faulted in on demand and evictable under pressure.
+	// Tunable via WAYPOINTD_DB_MMAP_SIZE (bytes, `0` disables).
+	conn.pragma_update(None, "mmap_size", pragmas.mmap_size)
 		.context("failed to set mmap_size pragma")?;
 	Ok(())
 }

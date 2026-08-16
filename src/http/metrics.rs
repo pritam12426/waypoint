@@ -231,6 +231,44 @@ impl Metrics {
 		);
 		let _ = writeln!(out, "# TYPE waypointd_db_readers_in_use gauge");
 		let _ = writeln!(out, "waypointd_db_readers_in_use {}", db.readers_in_use());
+		let _ = writeln!(out);
+
+		// Size/growth numbers from `Db::stats` (cheap PRAGMA + stat calls on
+		// a pooled reader). `wal_bytes` is the uncheckpointed frame backlog,
+		// and `freelist_pages` grows without a VACUUM — both are "is the
+		// file growing?" signals an operator can alert on.
+		let db_stats = db.stats();
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_file_bytes Main database file size on disk."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_file_bytes gauge");
+		let _ = writeln!(out, "waypointd_db_file_bytes {}", db_stats.file_bytes);
+		let _ = writeln!(out);
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_wal_bytes Size of the -wal sidecar (uncheckpointed committed frames)."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_wal_bytes gauge");
+		let _ = writeln!(out, "waypointd_db_wal_bytes {}", db_stats.wal_bytes);
+		let _ = writeln!(out);
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_pages Total pages in the database."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_pages gauge");
+		let _ = writeln!(out, "waypointd_db_pages {}", db_stats.page_count);
+		let _ = writeln!(out);
+		let _ = writeln!(
+			out,
+			"# HELP waypointd_db_freelist_pages Unused pages available for reuse (grows without a VACUUM)."
+		);
+		let _ = writeln!(out, "# TYPE waypointd_db_freelist_pages gauge");
+		let _ = writeln!(
+			out,
+			"waypointd_db_freelist_pages {}",
+			db_stats.freelist_pages
+		);
 
 		out
 	}

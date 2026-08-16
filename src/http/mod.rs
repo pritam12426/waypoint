@@ -135,6 +135,9 @@ pub struct Settings {
 	pub backup: Option<BackupConfig>,
 	pub request_timeout: Duration,
 	pub max_concurrency: usize,
+	/// SQLite RAM tunables (page cache + mmap) applied to every pooled
+	/// connection. Sourced from the `WAYPOINTD_DB_*` env vars in `main.rs`.
+	pub db_pragmas: database::DbPragmas,
 }
 
 /// Shared server state. `rusqlite::Connection` is `Send` but not `Sync`, so
@@ -186,7 +189,7 @@ pub async fn run(settings: Settings) -> Result<()> {
 	validate_host(&settings.host)?;
 	validate_port(settings.port)?;
 
-	let db = database::Db::open(&settings.db_path)?;
+	let db = database::Db::open_with(&settings.db_path, settings.db_pragmas)?;
 	crate::log_info!("database ready at {}", settings.db_path.display());
 
 	// A clone kept here survives the move into the router below, so the
@@ -243,6 +246,7 @@ pub async fn run(settings: Settings) -> Result<()> {
 	if let Some(backup) = settings.backup.clone() {
 		tokio::spawn(backup_loop(db_arc.clone(), backup));
 	}
+	tokio::spawn(maintenance_loop(db_arc.clone()));
 
 	let app = app(state);
 	// A bind failure (most often "Address already in use" — another service
@@ -326,6 +330,39 @@ async fn backup_loop(db: Arc<database::Db>, cfg: BackupConfig) {
 			}
 			Ok(Err(err)) => crate::log_warn!("backup to {dest_display} failed: {err:#}"),
 			Err(err) => crate::log_warn!("backup task failed: {err}"),
+		}
+	}
+}
+
+/// Weekly database health pass: `PRAGMA optimize` + `PRAGMA quick_check`
+/// on a pooled reader, so it never blocks writes. The first run waits one
+/// full interval (a fresh server just checkpointed on shutdown before this
+/// loop could run). Freelist/size numbers ride along on the success log so
+/// an operator sees whether the file is growing without a VACUUM.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+async fn maintenance_loop(db: Arc<database::Db>) {
+	let start = tokio::time::Instant::now() + MAINTENANCE_INTERVAL;
+	let mut ticker = tokio::time::interval_at(start, MAINTENANCE_INTERVAL);
+	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	loop {
+		ticker.tick().await;
+		let db = db.clone();
+		match tokio::task::spawn_blocking(move || {
+			let stats = db.stats();
+			db.run_maintenance()?;
+			Ok::<_, anyhow::Error>(stats)
+		})
+		.await
+		{
+			Ok(Ok(stats)) => crate::log_info!(
+				"maintenance: optimize + quick_check ok ({} pages, {} freelist pages, {} wal bytes)",
+				stats.page_count,
+				stats.freelist_pages,
+				stats.wal_bytes
+			),
+			Ok(Err(err)) => crate::log_error!("maintenance failed: {err:#}"),
+			Err(err) => crate::log_error!("maintenance task failed: {err}"),
 		}
 	}
 }

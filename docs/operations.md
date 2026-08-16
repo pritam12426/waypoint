@@ -11,6 +11,8 @@ them can be overridden.
 | variable                | default            | meaning                                                                       |
 | ----------------------- | ------------------ | ----------------------------------------------------------------------------- |
 | `WAYPOINTD_DB_FILE`     | `waypoint.sqlite`  | SQLite database path                                                          |
+| `WAYPOINTD_DB_CACHE_SIZE` | `32768`          | per-connection page cache in KiB (`0` = SQLite's default)                     |
+| `WAYPOINTD_DB_MMAP_SIZE` | `268435456`       | read-only mmap ceiling in bytes (`0` disables)                                |
 | `WAYPOINTD_SERVE_HOST`  | `localhost`        | bind host (IPv4/IPv6 address or a hostname)                                   |
 | `WAYPOINTD_SERVE_PORT`  | `8080`             | bind port (must be ≥ 1)                                                       |
 | `WAYPOINTD_SERVE_TOKEN` | _(none)_           | if set, `/api/*` + docs require `Authorization: Bearer <token>`               |
@@ -113,6 +115,12 @@ transient batch runs: ids restart from 1 on every boot, finished jobs are
 reaped after an hour, and a crashed server simply loses in-flight checks.
 If you need a check to survive a restart, run it again after.
 
+Separately, a weekly maintenance pass runs `PRAGMA optimize` (search-index
+and query-planner upkeep) followed by `PRAGMA quick_check` (a corruption
+scan) on a pooled reader connection, so it never blocks writes. It logs one
+`info` line with the resulting page/freelist/WAL numbers — a line that
+doubles as a "is the database file growing without a `VACUUM`?" heartbeat.
+
 ## Backing up
 
 The database is a single SQLite file, so a backup is a copy — with one
@@ -135,9 +143,16 @@ entirely.
 
 A release build is a single stripped binary, small enough to forget about
 (size optimization is a stated goal — `opt-level = "s"`, fat LTO, strip;
-see `Cargo.toml`). At runtime SQLite maps up to 256 MiB of the file read-only
-and holds ~32 MiB of page cache. The one number that actually scales with
-your collection is the media cache, which is bounded at 10,000 entries. A
+see `Cargo.toml`). At runtime the two tunable memory numbers are both SQLite
+and both set per connection: the page cache (default 32 MiB, via
+`WAYPOINTD_DB_CACHE_SIZE`) and the read-only mmap ceiling (default 256 MiB,
+via `WAYPOINTD_DB_MMAP_SIZE`). The mmap is *virtual* address space, not
+committed RAM — pages fault in on demand and are evictable under pressure.
+The embedded frontend costs almost nothing: it's mapped straight out of the
+binary (read-only, shared, evictable) and served zero-copy, and the hashed
+`assets/*` files carry `Cache-Control: immutable` so a browser fetches each
+chunk once per build. The one number that actually scales with your
+collection is the media cache, which is bounded at 10,000 entries. A
 list page beyond a few thousand bookmarks is where the keyset cursor in
 `api.md` earns its keep — offset pagination on the default `created_at`
 ordering works, but the cursor stays O(page) instead of scanning past

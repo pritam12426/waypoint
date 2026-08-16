@@ -163,6 +163,16 @@ fn print_config() {
 		config::db_file().display().to_string(),
 		config::DEFAULT_DB_FILE,
 	);
+	line(
+		"WAYPOINTD_DB_CACHE_SIZE",
+		config::db_cache_size_kib().to_string(),
+		&config::DEFAULT_DB_CACHE_SIZE_KIB.to_string(),
+	);
+	line(
+		"WAYPOINTD_DB_MMAP_SIZE",
+		config::db_mmap_size().to_string(),
+		&config::DEFAULT_DB_MMAP_SIZE.to_string(),
+	);
 	line("WAYPOINTD_SERVE_HOST", config::host(), config::DEFAULT_HOST);
 	line(
 		"WAYPOINTD_SERVE_PORT",
@@ -274,6 +284,10 @@ async fn main() -> anyhow::Result<()> {
 		}),
 		request_timeout: std::time::Duration::from_secs(config::request_timeout_secs()),
 		max_concurrency: config::max_concurrency(),
+		db_pragmas: waypointd::database::DbPragmas {
+			cache_size_kib: config::db_cache_size_kib(),
+			mmap_size: config::db_mmap_size(),
+		},
 	};
 
 	waypointd::log_debug!(

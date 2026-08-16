@@ -1436,3 +1436,32 @@ fn restore_refuses_when_the_url_is_taken_by_a_live_bookmark() {
 	assert_eq!(active.len(), 1);
 	assert_eq!(active[0].id, id2);
 }
+
+/// Backup, size stats, and the weekly maintenance pass all run on the pool
+/// without taking the writer: `backup` uses its own read-only connection and
+/// `stats`/`run_maintenance` a pooled reader, so an in-flight write can't be
+/// blocked by them.
+#[test]
+fn backup_stats_and_maintenance_do_not_need_the_writer() {
+	silence_logs();
+	let (_dir, path) = temp_db();
+	let db = Db::open(&path).unwrap();
+
+	// A writer that is genuinely held (never released) must not stop the
+	// snapshot, the gauges, or the health pass.
+	let held = db.writer();
+	bm_db::insert(&held, &plain_bookmark("https://example.com")).unwrap();
+
+	let dest = _dir.path().join("snapshot.sqlite");
+	db.backup(&dest).unwrap();
+	let verify = open(&dest).unwrap();
+	assert!(!table_names(&verify).is_empty());
+	drop(verify);
+
+	let stats = db.stats();
+	assert!(stats.file_bytes > 0);
+	assert!(stats.page_count > 0);
+
+	db.run_maintenance().unwrap();
+	drop(held);
+}
