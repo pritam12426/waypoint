@@ -225,6 +225,15 @@ pub fn import_html(
 		if url.is_empty() {
 			continue;
 		}
+		// Same control-character gate the HTTP layer applies to hand-typed
+		// URLs: a CR/LF would break every /open and /keywords redirect (axum
+		// can't build the Location header). Non-http schemes (mailto:,
+		// javascript:) are fine to import — the checker skips them.
+		if url.bytes().any(|b| b.is_ascii_control()) {
+			crate::log_warn!("skipped {url:?}: URL contains control characters");
+			skipped += 1;
+			continue;
+		}
 		let title = html_unescape(title.as_str().trim());
 
 		let new = NewBookmark {

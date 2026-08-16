@@ -20,7 +20,7 @@ use utoipa::IntoParams;
 
 use super::shared::{
 	X_NEXT_CURSOR, X_TOTAL_COUNT, parse_bound, validate_bounds, validate_id, validate_keyword,
-	validate_limit, validate_offset, validate_redirect_template,
+	validate_limit, validate_offset, validate_redirect_template, validate_url,
 };
 use crate::{
 	database::bookmarks as bm_db,
@@ -313,6 +313,7 @@ pub async fn create_bookmark(
 			"a url is required to create a bookmark",
 		));
 	}
+	validate_url(&new.url)?;
 	validate_keyword(new.keyword.as_deref())?;
 	validate_redirect_template(new.redirect_template.as_deref())?;
 
@@ -442,6 +443,9 @@ pub async fn update_bookmark(
 		return Err(AppError::invalid_url(
 			"the url cannot be emptied; remove the bookmark instead",
 		));
+	}
+	if let Some(url) = update.url.as_deref() {
+		validate_url(url)?;
 	}
 	validate_keyword(update.keyword.as_deref())?;
 	validate_redirect_template(update.redirect_template.as_deref())?;
@@ -855,6 +859,9 @@ pub async fn bulk_update_bookmarks(
 		return Err(AppError::invalid_url(
 			"the url cannot be emptied; remove the bookmarks instead",
 		));
+	}
+	if let Some(url) = update.url.as_deref() {
+		validate_url(url)?;
 	}
 	validate_keyword(update.keyword.as_deref())?;
 	validate_redirect_template(update.redirect_template.as_deref())?;

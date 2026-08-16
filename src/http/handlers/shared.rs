@@ -71,6 +71,21 @@ pub(super) fn validate_keyword(keyword: Option<&str>) -> Result<(), AppError> {
 	Ok(())
 }
 
+/// A stored URL must be free of control characters. A URL carrying a CR/LF
+/// makes axum's `Redirect::into_response` fail to build a Location header,
+/// turning every `/open/{id}` / `/keywords/{k}` redirect into a 500. That is
+/// the only gate here: non-http schemes (`mailto:`, `javascript:`, ...) are
+/// legitimate bookmarks and stay storable — the dead-link checker skips them
+/// via `core::url::is_http_url`, which is what guards redirects to them.
+pub(super) fn validate_url(url: &str) -> Result<(), AppError> {
+	if url.bytes().any(|b| b.is_ascii_control()) {
+		return Err(AppError::invalid_url(
+			"the url may not contain control characters",
+		));
+	}
+	Ok(())
+}
+
 /// A redirect template must carry at least one `{%s}` placeholder — without
 /// one there is nothing for the address-bar value to fill, and the shortcut
 /// would silently always fall back to the plain URL. An empty string clears
@@ -82,6 +97,16 @@ pub(super) fn validate_redirect_template(template: Option<&str>) -> Result<(), A
 	{
 		return Err(AppError::invalid_payload(
 			"a redirect template must contain at least one {%s} placeholder",
+		));
+	}
+	// A template is substituted into a redirect Location, so a control
+	// character would break the header exactly like a bad stored URL (500 on
+	// every hit) — keep it out.
+	if let Some(t) = template
+		&& t.bytes().any(|b| b.is_ascii_control())
+	{
+		return Err(AppError::invalid_payload(
+			"a redirect template may not contain control characters",
 		));
 	}
 	Ok(())
