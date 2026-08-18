@@ -67,7 +67,6 @@ use tokio::sync::Semaphore;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use docs::{serve_docs_ui, serve_openapi};
-use error::X_WAYPOINT_ERROR;
 use handlers::X_WAYPOINT_STATIC;
 
 /// Ceiling on JSON request bodies (bookmark payloads, imports, checks).
@@ -407,8 +406,11 @@ async fn shutdown_signal() {
 /// axum extractor rejections (malformed JSON body, bad query string,
 /// unparseable path segment), missing static assets, and anything else
 /// that returns a 4xx/5xx without passing through `AppError`. The
-/// `x-waypoint-error` header marks responses that were already logged, so
-/// nothing is reported twice. 4xx -> warn, 5xx -> error.
+/// Access-log middleware. One line per request with the response status.
+/// The line's level follows the outcome: static assets and redirects are
+/// navigational noise (debug), successful requests are info, 4xx client
+/// errors are warn, 5xx server errors are error — so a failing route shows
+/// up in the operator's warn/error stream without a second pass.
 async fn log_request(State(state): State<AppState>, req: Request, next: Next) -> Response {
 	let started = Instant::now();
 	let method = req.method().clone();
@@ -435,17 +437,12 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
 	// chases on its own, so they get a debug line too.
 	if response.headers().contains_key(X_WAYPOINT_STATIC) || status.is_redirection() {
 		crate::log_debug!("{method} {path}: {status} in {elapsed:?}");
+	} else if status.is_server_error() {
+		crate::log_error!("{method} {path}: {status} in {elapsed:?}");
+	} else if status.is_client_error() {
+		crate::log_warn!("{method} {path}: {status} in {elapsed:?}");
 	} else {
 		crate::log_info!("{method} {path}: {status} in {elapsed:?}");
-	}
-	if (status.is_client_error() || status.is_server_error())
-		&& !response.headers().contains_key(X_WAYPOINT_ERROR)
-	{
-		if status.is_server_error() {
-			crate::log_error!("{method} {path}: failed with {status} after {elapsed:?}");
-		} else {
-			crate::log_warn!("{method} {path}: rejected with {status} after {elapsed:?}");
-		}
 	}
 	response
 }

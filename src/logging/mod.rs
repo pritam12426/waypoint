@@ -349,16 +349,35 @@ pub fn log_record(level: LogLevel, loc: Option<SourceLoc>, new_line: bool, msg: 
 	let mut state = logger().lock().unwrap();
 
 	if state.stream.is_none() {
-		let _ = write!(
-			io::stderr(),
-			"{}[logging] error: log_init() not called — dropping message{}",
-			color::BOLD_RED,
-			color::RESET
-		);
-		if new_line {
-			let _ = writeln!(io::stderr());
+		// Test binaries log from many inline `#[cfg(test)]` modules before
+		// any `log_init` (the dedicated test files silence theirs at `Off`),
+		// so the first stray log initializes to `Off` instead of spamming
+		// stderr 136 times. A later explicit `log_init` (e.g. the test
+		// files' `silence_logs`, which honours `WAYPOINTD_LOG_LEVEL`)
+		// reconfigures from there, so opt-in output still works.
+		#[cfg(test)]
+		{
+			*state = LoggerState {
+				stream: Some(Output::Stderr),
+				level: LogLevel::Off,
+				use_color: false,
+				format: LogFormat::Pretty,
+			};
+			return;
 		}
-		return;
+		#[cfg(not(test))]
+		{
+			let _ = write!(
+				io::stderr(),
+				"{}[logging] error: log_init() not called — dropping message{}",
+				color::BOLD_RED,
+				color::RESET
+			);
+			if new_line {
+				let _ = writeln!(io::stderr());
+			}
+			return;
+		}
 	}
 
 	if (level as i32) > (state.level as i32) {

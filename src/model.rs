@@ -560,10 +560,43 @@ pub struct BookmarkFilter {
 	pub never_visited: bool,
 	pub limit: Option<i64>,
 	pub offset: Option<i64>,
+	/// Sort column and direction for the active list. Both default to the
+	/// existing behaviour (`created_at DESC`); any explicit sort switches to
+	/// plain offset pagination (a keyset cursor only walks the default
+	/// ordering).
+	pub sort_by: SortColumn,
+	pub sort_order: SortOrder,
 	/// Keyset pagination bound: the `(created_at, id)` of the last row of the
 	/// previous page, as `(created_at, id) < (?, ?)`. Consumed by `list` only
 	/// — `count`/`select_ids`/`remove_matching` must NOT see it (a cursor
 	/// describes a *page*, not a filter, so totals stay whole-corpus). The
 	/// HTTP layer decodes it from an opaque `X-Next-Cursor` token.
 	pub before_cursor: Option<(String, i64)>,
+}
+
+/// Column a bookmark list can be sorted by. The database layer maps each
+/// variant to a whitelisted SQL expression, so a sort can never inject SQL.
+/// `starred`, `title`, `description`, `updated_at` and `created_at` back
+/// the table view's sortable headers; `visit_count` is there for the same
+/// mechanism's future use.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SortColumn {
+	#[default]
+	CreatedAt,
+	Title,
+	Starred,
+	Description,
+	UpdatedAt,
+	VisitCount,
+}
+
+/// Sort direction for a bookmark list. Missing/`desc` preserves the
+/// historical newest-first default.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+	#[default]
+	Desc,
+	Asc,
 }

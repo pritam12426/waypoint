@@ -31,7 +31,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
 
 use crate::core::media;
-use crate::model::{Bookmark, BookmarkFilter, BulkRemoveResult, NewBookmark, UpdateBookmark};
+use crate::model::{
+	Bookmark, BookmarkFilter, BulkRemoveResult, NewBookmark, SortColumn, SortOrder, UpdateBookmark,
+};
 use crate::shared::{MAX_PAGE_SIZE, extract_domain};
 
 use super::categories::get_or_create;
@@ -523,6 +525,24 @@ pub fn list(conn: &Connection, filter: &BookmarkFilter) -> Result<Vec<Bookmark>>
 
 	if filter.trash {
 		sql.push_str(" ORDER BY b.trashed_at DESC");
+	} else if filter.sort_by != SortColumn::CreatedAt || filter.sort_order != SortOrder::Desc {
+		// Explicit sort (or the default column in a non-default direction):
+		// plain ORDER BY over a whitelisted column with an id tiebreak.
+		// The HTTP layer rejects a cursor alongside any explicit sort, so
+		// there is no keyset bound here.
+		let column = match filter.sort_by {
+			SortColumn::CreatedAt => "b.created_at",
+			SortColumn::Title => "b.title COLLATE NOCASE",
+			SortColumn::Starred => "b.starred",
+			SortColumn::Description => "b.description COLLATE NOCASE",
+			SortColumn::UpdatedAt => "b.updated_at",
+			SortColumn::VisitCount => "b.visit_count",
+		};
+		let dir = match filter.sort_order {
+			SortOrder::Desc => "DESC",
+			SortOrder::Asc => "ASC",
+		};
+		sql.push_str(&format!(" ORDER BY {column} {dir}, b.id {dir}"));
 	} else {
 		// Cursor bound before the ORDER BY: row-value comparison on the same
 		// leading key, so the index SEARCH range and the backwards scan

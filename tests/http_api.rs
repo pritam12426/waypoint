@@ -214,6 +214,78 @@ async fn list_paginates_by_cursor() {
 }
 
 #[tokio::test]
+async fn list_sorts_by_column_and_direction() {
+	silence_logs();
+	let (_dir, state) = test_state();
+
+	for (url, title) in [
+		("https://example.com/bravo", "Bravo"),
+		("https://example.com/alpha", "Alpha"),
+		("https://example.com/charlie", "Charlie"),
+	] {
+		let res = request(
+			&state,
+			Method::POST,
+			"/api/bookmarks",
+			Body::from(json!({ "url": url, "title": title }).to_string()),
+		)
+		.await;
+		assert_eq!(res.status(), StatusCode::CREATED);
+	}
+
+	// Title ascending: Alpha, Bravo, Charlie.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?sort_by=title&order=asc",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	let asc = body_text(res).await;
+	let a = asc.find("Alpha").unwrap();
+	let b = asc.find("Bravo").unwrap();
+	let c = asc.find("Charlie").unwrap();
+	assert!(a < b && b < c, "title asc order wrong: {asc}");
+
+	// Title descending: Charlie, Bravo, Alpha.
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?sort_by=title&order=desc",
+		Body::empty(),
+	)
+	.await;
+	let desc = body_text(res).await;
+	let a = desc.find("Alpha").unwrap();
+	let b = desc.find("Bravo").unwrap();
+	let c = desc.find("Charlie").unwrap();
+	assert!(c < b && b < a, "title desc order wrong: {desc}");
+
+	// Default ordering (no params) stays newest-created-first, and the
+	// total is whole-corpus regardless of sort.
+	let res = request(&state, Method::GET, "/api/bookmarks", Body::empty()).await;
+	assert_eq!(
+		res.headers()
+			.get("x-total-count")
+			.and_then(|v| v.to_str().ok())
+			.unwrap(),
+		"3"
+	);
+
+	// A cursor plus an explicit sort is a 400 (the bound only makes sense
+	// for the default ordering).
+	let res = request(
+		&state,
+		Method::GET,
+		"/api/bookmarks?sort_by=title&cursor=abc",
+		Body::empty(),
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn inverted_time_range_is_a_400() {
 	silence_logs();
 	let (_dir, state) = test_state();

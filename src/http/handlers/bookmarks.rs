@@ -30,7 +30,7 @@ use crate::{
 	},
 	model::{
 		Bookmark, BookmarkFilter, BulkRemoveResult, BulkUpdateRequest, BulkUpdateResult,
-		NewBookmark, UpdateBookmark,
+		NewBookmark, SortColumn, SortOrder, UpdateBookmark,
 	},
 };
 
@@ -79,8 +79,14 @@ pub struct ListQuery {
 	/// Opaque keyset token returned in the `x-next-cursor` header of a
 	/// previous page. Constant-time deep pagination (index range SEARCH) as
 	/// opposed to the OFFSET walk. Only valid for the active (non-trash)
-	/// list.
+	/// list, and only with the default ordering — any `sort_by`/`order`
+	/// switches to offset pagination.
 	cursor: Option<String>,
+	/// Sort column for the active list: `created_at` (default), `title`,
+	/// `starred`, `description`, `updated_at`, `visit_count`.
+	sort_by: Option<SortColumn>,
+	/// Sort direction: `desc` (default) or `asc`.
+	order: Option<SortOrder>,
 }
 
 /// List bookmarks, optionally filtered.
@@ -111,6 +117,14 @@ pub async fn list_bookmarks(
 ) -> Result<Response, AppError> {
 	let limit = validate_limit(q.limit)?;
 	let offset = validate_offset(q.offset)?;
+	// A cursor walks the default (created_at DESC) ordering's keyset bound;
+	// an explicit sort changes the ORDER BY, so the token would describe the
+	// wrong page. Reject the combination rather than silently mis-sorting.
+	if q.cursor.is_some() && (q.sort_by.is_some() || q.order.is_some()) {
+		return Err(AppError::invalid_limit(
+			"cursor pagination only supports the default (created_at) ordering; pass no sort parameters",
+		));
+	}
 	// The cursor is an opaque token (see `http::cursor`); decode it into the
 	// keyset bound. A malformed token is a 400, mirroring the other query
 	// validation. Trash never paginates by cursor.
@@ -175,6 +189,9 @@ pub async fn list_bookmarks(
 		limit: Some(limit),
 		// Cursor and offset are mutually exclusive; the cursor wins.
 		offset: before_cursor.as_ref().map_or(Some(offset), |_| None),
+		// Default sort keeps the historical created_at DESC fast path.
+		sort_by: q.sort_by.unwrap_or_default(),
+		sort_order: q.order.unwrap_or_default(),
 		before_cursor,
 	};
 	let db = state.db.clone();
@@ -188,6 +205,8 @@ pub async fn list_bookmarks(
 		key_filter.limit = None;
 		key_filter.offset = None;
 		key_filter.before_cursor = None;
+		key_filter.sort_by = Default::default();
+		key_filter.sort_order = Default::default();
 		format!("{key_filter:?}")
 	};
 	// `list` and `count` run together inside one spawn_blocking so they see
@@ -847,6 +866,8 @@ pub async fn bulk_delete_bookmarks(
 			limit: None,
 			offset: None,
 			before_cursor: None,
+			sort_by: Default::default(),
+			sort_order: Default::default(),
 		}
 	} else {
 		BookmarkFilter::default()
